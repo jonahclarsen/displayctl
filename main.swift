@@ -401,12 +401,17 @@ private final class DisplayController {
         }
 
         let completed = CGCompleteDisplayConfiguration(config, .forSession)
-        guard completed == .success else { throw ToolError.complete(completed) }
+        // The private API can report a commit error even though WindowServer
+        // applies the requested state. Treat the observed display state as the
+        // source of truth so a successful transition is not retried and logged.
+        let deadline = Date().addingTimeInterval(1.5)
+        repeat {
+            if (CGDisplayIsOnline(displayID) != 0) == online { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
 
-        Thread.sleep(forTimeInterval: 0.35)
-        guard (CGDisplayIsOnline(displayID) != 0) == online else {
-            throw ToolError.verification(displayID, expectedOnline: online)
-        }
+        guard completed == .success else { throw ToolError.complete(completed) }
+        throw ToolError.verification(displayID, expectedOnline: online)
     }
 
     private func recoverInterruptedRun() throws {
