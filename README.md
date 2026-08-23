@@ -16,6 +16,16 @@ Virtual displays and AirPlay displays do not count as physical external displays
 
 The tool uses an undocumented macOS display API and may stop working after a macOS update.
 
+## Quick install
+
+Open Terminal, paste this entire line, and press Return:
+
+```sh
+git clone https://github.com/jonahclarsen/displayctl.git && cd displayctl && swiftc main.swift -o displayctl && sudo mkdir -p /usr/local/bin && sudo install -m 755 displayctl /usr/local/bin/displayctl
+```
+
+Enter your Mac password when prompted. Terminal will not show characters while you type the password; this is normal. If the command reports that `swiftc` is missing, run `xcode-select --install`, finish the installation, and then try the command again.
+
 ## Build and install
 
 ```sh
