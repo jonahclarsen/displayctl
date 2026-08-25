@@ -20,7 +20,6 @@ private enum ToolError: Error, CustomStringConvertible {
     case privateAPIUnavailable
     case noBuiltInDisplay
     case multipleBuiltInDisplays([CGDirectDisplayID])
-    case noActiveExternalDisplay
     case begin(CGError)
     case configure(CGError)
     case complete(CGError)
@@ -48,8 +47,6 @@ private enum ToolError: Error, CustomStringConvertible {
             return "No built-in display was found."
         case let .multipleBuiltInDisplays(ids):
             return "Multiple built-in displays were found (\(ids.map(String.init).joined(separator: ", "))); refusing to guess."
-        case .noActiveExternalDisplay:
-            return "No active external display was found; refusing to turn off the built-in panel."
         case let .begin(error):
             return "Could not begin display configuration (CoreGraphics error \(error.rawValue))."
         case let .configure(error):
@@ -223,14 +220,12 @@ private final class DisplayController {
         let builtIns = ids.filter { CGDisplayIsBuiltin($0) != 0 }
         guard !builtIns.isEmpty else { throw ToolError.noBuiltInDisplay }
         guard builtIns.count == 1 else { throw ToolError.multipleBuiltInDisplays(builtIns) }
-        guard hasActiveExternalDisplay() else {
-            throw ToolError.noActiveExternalDisplay
-        }
 
         let builtInID = builtIns[0]
+        let externalPresent = hasActiveExternalDisplay()
         let builtInAlreadyOffline = CGDisplayIsOnline(builtInID) == 0
         try saveRecovery(displayID: builtInID, watchdogPID: getpid())
-        if !builtInAlreadyOffline {
+        if externalPresent && !builtInAlreadyOffline {
             do {
                 try configure(displayID: builtInID, online: false)
             } catch {
@@ -239,10 +234,12 @@ private final class DisplayController {
             }
         }
 
-        observedExternalPresent = true
+        observedExternalPresent = externalPresent
         externalPresentSince = Date()
 
-        if builtInAlreadyOffline {
+        if !externalPresent {
+            print("No physical external display is connected. Dock supervisor active; waiting for a monitor to connect.")
+        } else if builtInAlreadyOffline {
             print("Built-in display \(builtInID) is already off. Dock supervisor active; press Control-C to stop and restore it.")
         } else {
             print("Built-in display \(builtInID) is off. Dock supervisor active; press Control-C to stop and restore it.")
