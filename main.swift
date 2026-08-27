@@ -183,6 +183,7 @@ private final class DisplayController {
     private var displayCallbackRegistered = false
     private var observedExternalPresent: Bool?
     private var externalPresentSince = Date.distantPast
+    private var lastReconcileError: String?
     private let reconnectSettleSeconds: TimeInterval = 2
 
     private var recoveryURL: URL {
@@ -316,6 +317,7 @@ private final class DisplayController {
         if observedExternalPresent != externalPresent {
             observedExternalPresent = externalPresent
             externalPresentSince = now
+            lastReconcileError = nil
             if externalPresent {
                 printStatus("Physical external display connected; waiting for it to settle.")
             }
@@ -325,24 +327,37 @@ private final class DisplayController {
             if CGDisplayIsOnline(displayID) == 0 {
                 do {
                     try configure(displayID: displayID, online: true)
+                    lastReconcileError = nil
                     printStatus("External display disappeared; built-in display restored. Waiting for a monitor to reconnect.")
                 } catch {
-                    printStatus("displayctl: could not restore the built-in display yet: \(error)", toError: true)
+                    printReconcileErrorOnce("displayctl: could not restore the built-in display yet: \(error)")
                 }
+            } else {
+                lastReconcileError = nil
             }
             return
         }
 
-        guard CGDisplayIsOnline(displayID) != 0,
-              now.timeIntervalSince(externalPresentSince) >= reconnectSettleSeconds else {
+        guard CGDisplayIsOnline(displayID) != 0 else {
+            lastReconcileError = nil
+            return
+        }
+        guard now.timeIntervalSince(externalPresentSince) >= reconnectSettleSeconds else {
             return
         }
         do {
             try configure(displayID: displayID, online: false)
+            lastReconcileError = nil
             printStatus("External display is ready; built-in display turned off again.")
         } catch {
-            printStatus("displayctl: could not turn off the built-in display yet: \(error)", toError: true)
+            printReconcileErrorOnce("displayctl: could not turn off the built-in display yet: \(error)")
         }
+    }
+
+    private func printReconcileErrorOnce(_ message: String) {
+        guard lastReconcileError != message else { return }
+        lastReconcileError = message
+        printStatus(message, toError: true)
     }
 
     private func printStatus(_ message: String, toError: Bool = false) {
