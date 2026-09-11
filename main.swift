@@ -164,6 +164,12 @@ private struct RecoveryRecord: Codable {
     let watchdogPID: Int32?
 }
 
+private enum ExternalDisplayState: Int32 {
+    case ready = 0
+    case absent = 1
+    case inactive = 2
+}
+
 private func displayReconfigurationCallback(
     _: CGDirectDisplayID,
     flags: CGDisplayChangeSummaryFlags,
@@ -196,8 +202,8 @@ private final class DisplayController {
     private var signalSources: [DispatchSourceSignal] = []
     private var externalMonitor: DispatchSourceTimer?
     private var displayCallbackRegistered = false
-    private var observedExternalPresent: Bool?
-    private var externalPresentSince = Date.distantPast
+    private var observedExternalState: ExternalDisplayState?
+    private var externalReadySince = Date.distantPast
     private var reconcileErrors = ReconcileErrorLog()
     private let reconnectSettleSeconds: TimeInterval = 2
 
@@ -215,6 +221,7 @@ private final class DisplayController {
             var traits = [CGDisplayIsBuiltin(id) != 0 ? "built-in" : "external"]
             traits.append(CGDisplayIsActive(id) != 0 ? "active" : "inactive")
             traits.append(CGDisplayIsOnline(id) != 0 ? "online" : "offline")
+            if CGDisplayIsAsleep(id) != 0 { traits.append("asleep") }
             if CGDisplayIsMain(id) != 0 { traits.append("main") }
             if mirror != kCGNullDirectDisplay { traits.append("mirrors=\(mirror)") }
             if let name = api.physicalExternalName(displayID: id) { traits.append("physical=\(name)") }
@@ -225,8 +232,15 @@ private final class DisplayController {
         }
     }
 
-    func probeExternalDisplay() -> Bool {
-        hasActiveExternalDisplay()
+    func probeExternalDisplay() -> ExternalDisplayState {
+        let physicalExternals = api.onlineDisplayIDs().filter {
+            api.physicalExternalName(displayID: $0) != nil
+        }
+        guard !physicalExternals.isEmpty else { return .absent }
+        // Online includes sleeping displays. Active additionally requires the
+        // display to be awake and drawable; inactivity is not a disconnect.
+        return physicalExternals.contains { CGDisplayIsActive($0) != 0 }
+            ? .ready : .inactive
     }
 
     func turnOff(restoreAfter: TimeInterval?) throws -> Never {
@@ -238,10 +252,10 @@ private final class DisplayController {
         guard builtIns.count == 1 else { throw ToolError.multipleBuiltInDisplays(builtIns) }
 
         let builtInID = builtIns[0]
-        let externalPresent = hasActiveExternalDisplay()
+        let externalState = probeExternalDisplay()
         let builtInAlreadyOffline = CGDisplayIsOnline(builtInID) == 0
         try saveRecovery(displayID: builtInID, watchdogPID: getpid())
-        if externalPresent && !builtInAlreadyOffline {
+        if externalState == .ready && !builtInAlreadyOffline {
             do {
                 try configure(displayID: builtInID, online: false)
             } catch {
@@ -250,11 +264,13 @@ private final class DisplayController {
             }
         }
 
-        observedExternalPresent = externalPresent
-        externalPresentSince = Date()
+        observedExternalState = externalState
+        externalReadySince = Date()
 
-        if !externalPresent {
+        if externalState == .absent {
             print("No physical external display is connected. Dock supervisor active; waiting for a monitor to connect.")
+        } else if externalState == .inactive {
+            print("Physical external display is connected but inactive. Dock supervisor active; waiting for it to wake.")
         } else if builtInAlreadyOffline {
             print("Built-in display \(builtInID) is already off. Dock supervisor active; press Control-C to stop and restore it.")
         } else {
@@ -317,27 +333,35 @@ private final class DisplayController {
         }
     }
 
-    private func hasActiveExternalDisplay() -> Bool {
-        api.onlineDisplayIDs().contains {
-            CGDisplayIsBuiltin($0) == 0 && CGDisplayIsActive($0) != 0 &&
-                api.physicalExternalName(displayID: $0) != nil
+    private func reconcileDisplayState(displayID: CGDirectDisplayID) {
+        guard !restoring else { return }
+        let externalState = freshProcessExternalDisplayState()
+        reconcileDisplayState(
+            externalState: externalState,
+            builtInOnline: CGDisplayIsOnline(displayID) != 0
+        ) { online in
+            try configure(displayID: displayID, online: online)
         }
     }
 
-    private func reconcileDisplayState(displayID: CGDirectDisplayID) {
-        guard !restoring else { return }
-        let externalPresent = freshProcessHasActiveExternalDisplay()
-        let now = Date()
-
-        if observedExternalPresent != externalPresent {
-            observedExternalPresent = externalPresent
-            externalPresentSince = now
-            if externalPresent {
-                printStatus("Physical external display connected; waiting for it to settle.")
+    private func reconcileDisplayState(
+        externalState: ExternalDisplayState,
+        builtInOnline: Bool,
+        now: Date = Date(),
+        configure: (Bool) throws -> Void
+    ) {
+        if observedExternalState != externalState {
+            observedExternalState = externalState
+            externalReadySince = now
+            if externalState == .ready {
+                printStatus("Physical external display connected or awake; waiting for it to settle.")
             }
         }
 
-        let builtInOnline = CGDisplayIsOnline(displayID) != 0
+        // Leave the configuration alone while the external monitor sleeps.
+        // On wake, require a fresh settle interval before disabling the panel.
+        guard externalState != .inactive else { return }
+        let externalPresent = externalState == .ready
         if builtInOnline == !externalPresent {
             reconcileErrors.reset()
             return
@@ -345,7 +369,7 @@ private final class DisplayController {
 
         if !externalPresent {
             do {
-                try configure(displayID: displayID, online: true)
+                try configure(true)
                 reconcileErrors.reset()
                 printStatus("External display disappeared; built-in display restored. Waiting for a monitor to reconnect.")
             } catch {
@@ -354,11 +378,11 @@ private final class DisplayController {
             return
         }
 
-        guard now.timeIntervalSince(externalPresentSince) >= reconnectSettleSeconds else {
+        guard now.timeIntervalSince(externalReadySince) >= reconnectSettleSeconds else {
             return
         }
         do {
-            try configure(displayID: displayID, online: false)
+            try configure(false)
             reconcileErrors.reset()
             printStatus("External display is ready; built-in display turned off again.")
         } catch {
@@ -381,25 +405,26 @@ private final class DisplayController {
         }
     }
 
-    private func freshProcessHasActiveExternalDisplay() -> Bool {
+    private func freshProcessExternalDisplayState() -> ExternalDisplayState {
         var pathBufferSize: UInt32 = 0
         _NSGetExecutablePath(nil, &pathBufferSize)
         var pathBuffer = [CChar](repeating: 0, count: Int(pathBufferSize))
-        guard _NSGetExecutablePath(&pathBuffer, &pathBufferSize) == 0 else { return false }
+        guard _NSGetExecutablePath(&pathBuffer, &pathBufferSize) == 0 else { return .absent }
 
         let probe = Process()
         probe.executableURL = URL(fileURLWithPath: String(cString: pathBuffer))
-        probe.arguments = ["probe-external"]
+        probe.arguments = ["probe-external-state"]
         probe.standardOutput = FileHandle.nullDevice
         probe.standardError = FileHandle.nullDevice
         do {
             try probe.run()
             probe.waitUntilExit()
-            return probe.terminationReason == .exit && probe.terminationStatus == 0
+            guard probe.terminationReason == .exit else { return .absent }
+            return ExternalDisplayState(rawValue: probe.terminationStatus) ?? .absent
         } catch {
             // Safety wins: if current hardware presence cannot be established,
             // bring the built-in display back rather than risk a black desktop.
-            return false
+            return .absent
         }
     }
 
@@ -533,7 +558,9 @@ do {
          "restore" where arguments.count == 1:
         try controller.turnOn()
     case "probe-external" where arguments.count == 1:
-        exit(controller.probeExternalDisplay() ? EXIT_SUCCESS : EXIT_FAILURE)
+        exit(controller.probeExternalDisplay() == .ready ? EXIT_SUCCESS : EXIT_FAILURE)
+    case "probe-external-state" where arguments.count == 1:
+        exit(controller.probeExternalDisplay().rawValue)
     default:
         throw ToolError.invalidArguments
     }

@@ -4,6 +4,7 @@
 
 - When every physical external display disappears, it restores the built-in display.
 - When an external display reconnects and settles, it turns the built-in display off again.
+- When a connected external display sleeps, it leaves the display configuration alone and waits for the monitor to wake and settle.
 - If macOS has already turned the built-in display off because the lid is closed, it simply starts the supervisor.
 
 Virtual displays and AirPlay displays do not count as physical external displays.

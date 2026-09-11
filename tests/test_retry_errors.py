@@ -10,13 +10,23 @@ import unittest
 
 
 class RetryErrorTests(unittest.TestCase):
-    def test_warnings_stay_suppressed_until_recovery(self):
+    def run_swift(self, harness):
         source = (Path(__file__).resolve().parents[1] / "main.swift").read_text()
         definitions, marker, _ = source.partition("// MARK: Command-line entry point")
         self.assertTrue(marker, "Could not locate the CLI entry point")
         # Compile in the same file so the harness can exercise private logging
         # without exposing a test command or invoking display configuration APIs.
-        harness = r'''
+        with tempfile.TemporaryDirectory(prefix="displayctl-tests-") as directory:
+            main = Path(directory) / "main.swift"
+            binary = Path(directory) / "test-displayctl"
+            main.write_text(definitions + harness)
+            subprocess.run(["swiftc", str(main), "-o", str(binary)], check=True)
+            return subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=True
+            )
+
+    def test_warnings_stay_suppressed_until_recovery(self):
+        result = self.run_swift(r'''
 extension DisplayController {
     func exerciseRetryLogging() {
         let restore = "displayctl: could not restore: CoreGraphics error 1014"
@@ -36,15 +46,7 @@ extension DisplayController {
     }
 }
 DisplayController().exerciseRetryLogging()
-'''
-        with tempfile.TemporaryDirectory(prefix="displayctl-tests-") as directory:
-            main = Path(directory) / "main.swift"
-            binary = Path(directory) / "retry-errors"
-            main.write_text(definitions + harness)
-            subprocess.run(["swiftc", str(main), "-o", str(binary)], check=True)
-            result = subprocess.run(
-                [str(binary)], capture_output=True, text=True, check=True
-            )
+''')
 
         suffix = (
             " Retrying automatically; duplicate warnings will be suppressed "
@@ -56,6 +58,84 @@ DisplayController().exerciseRetryLogging()
             "displayctl: could not turn off: CoreGraphics error 1014" + suffix,
             "displayctl: could not restore: CoreGraphics error 1014" + suffix,
         ])
+
+    def test_sleep_wake_and_unplug_configuration_decisions(self):
+        result = self.run_swift(r'''
+extension DisplayController {
+    func exerciseSleepWake() {
+        var requests: [Bool] = []
+        func step(_ state: ExternalDisplayState, online: Bool, time: Double) {
+            reconcileDisplayState(
+                externalState: state, builtInOnline: online,
+                now: Date(timeIntervalSinceReferenceDate: time)
+            ) { requests.append($0) }
+        }
+
+        step(.ready, online: false, time: 0)
+        for tick in 1...1_000 {
+            step(.inactive, online: false, time: Double(tick))
+        }
+        // Sleeping must neither restore an offline panel nor disable an online one.
+        step(.inactive, online: true, time: 1_001)
+        precondition(requests.isEmpty, "Sleep must not configure the built-in display")
+
+        step(.ready, online: true, time: 1_002)
+        step(.ready, online: true, time: 1_003.9)
+        precondition(requests.isEmpty, "Wake must start a fresh settle interval")
+        step(.ready, online: true, time: 1_004)
+        precondition(requests == [false], "Disable only after the monitor settles")
+        step(.ready, online: false, time: 1_005)
+        precondition(requests == [false], "Do not reconfigure a satisfied state")
+
+        // A real unplug still restores promptly, even if the monitor was asleep.
+        step(.inactive, online: false, time: 1_006)
+        step(.absent, online: false, time: 1_007)
+        precondition(requests == [false, true], "Unplug must restore the panel")
+        step(.absent, online: true, time: 1_008)
+        precondition(requests == [false, true])
+
+        step(.ready, online: true, time: 1_009)
+        step(.ready, online: true, time: 1_010.9)
+        precondition(requests == [false, true], "Reconnect must also settle")
+        step(.ready, online: true, time: 1_011)
+        precondition(requests == [false, true, false])
+    }
+}
+DisplayController().exerciseSleepWake()
+''')
+        self.assertEqual(result.stderr, "")
+
+    def test_sleep_does_not_reset_failed_restoration_warnings(self):
+        result = self.run_swift(r'''
+extension DisplayController {
+    func exerciseFailedRestoration() {
+        var attempts = 0
+        func fail(_ state: ExternalDisplayState) {
+            reconcileDisplayState(externalState: state, builtInOnline: false) { online in
+                precondition(online)
+                attempts += 1
+                throw ToolError.complete(CGError(rawValue: 1014)!)
+            }
+        }
+        fail(.absent)
+        fail(.inactive)
+        fail(.absent)
+        precondition(attempts == 2, "Sleep must skip configuration, unplug must retry")
+        // Recovery observed without our intervention must re-enable warnings too.
+        reconcileDisplayState(externalState: .absent, builtInOnline: true) { _ in
+            preconditionFailure("Already restored")
+        }
+        fail(.absent)
+        precondition(attempts == 3)
+    }
+}
+DisplayController().exerciseFailedRestoration()
+''')
+        self.assertEqual(result.stdout, "")
+        warnings = result.stderr.splitlines()
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(warnings[0], warnings[1])
+        self.assertIn("CoreGraphics error 1014", warnings[0])
 
 
 if __name__ == "__main__":
