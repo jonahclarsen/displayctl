@@ -45,6 +45,8 @@ displayctl on
 
 `displayctl off` remains in the foreground. Leave it running while using the external-only setup. Press Control-C, or run `displayctl on` from another terminal, to restore the built-in display and stop the supervisor.
 
+If a display change fails, the supervisor keeps retrying but prints each distinct warning only once until the requested display state is reached. Installing an update does not replace an already-running supervisor; restart `displayctl off` to use the new version.
+
 Examples:
 
 ```sh

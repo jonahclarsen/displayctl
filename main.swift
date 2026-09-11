@@ -174,6 +174,21 @@ private func displayReconfigurationCallback(
     controller.handleDisplayReconfiguration()
 }
 
+// Remember every warning in a failure episode, even if errors alternate.
+// Only reaching the requested display state ends the episode; a topology
+// notification alone does not mean that a failed configuration recovered.
+private struct ReconcileErrorLog {
+    private var reportedMessages: Set<String> = []
+
+    mutating func shouldReport(_ message: String) -> Bool {
+        reportedMessages.insert(message).inserted
+    }
+
+    mutating func reset() {
+        reportedMessages.removeAll()
+    }
+}
+
 private final class DisplayController {
     private let api = PrivateDisplayAPI()
     private let watchdogQueue = DispatchQueue(label: "displayctl.watchdog")
@@ -183,6 +198,7 @@ private final class DisplayController {
     private var displayCallbackRegistered = false
     private var observedExternalPresent: Bool?
     private var externalPresentSince = Date.distantPast
+    private var reconcileErrors = ReconcileErrorLog()
     private let reconnectSettleSeconds: TimeInterval = 2
 
     private var recoveryURL: URL {
@@ -321,28 +337,38 @@ private final class DisplayController {
             }
         }
 
+        let builtInOnline = CGDisplayIsOnline(displayID) != 0
+        if builtInOnline == !externalPresent {
+            reconcileErrors.reset()
+            return
+        }
+
         if !externalPresent {
-            if CGDisplayIsOnline(displayID) == 0 {
-                do {
-                    try configure(displayID: displayID, online: true)
-                    printStatus("External display disappeared; built-in display restored. Waiting for a monitor to reconnect.")
-                } catch {
-                    printStatus("displayctl: could not restore the built-in display yet: \(error)", toError: true)
-                }
+            do {
+                try configure(displayID: displayID, online: true)
+                reconcileErrors.reset()
+                printStatus("External display disappeared; built-in display restored. Waiting for a monitor to reconnect.")
+            } catch {
+                printReconcileErrorOnce("displayctl: could not restore the built-in display yet: \(error)")
             }
             return
         }
 
-        guard CGDisplayIsOnline(displayID) != 0,
-              now.timeIntervalSince(externalPresentSince) >= reconnectSettleSeconds else {
+        guard now.timeIntervalSince(externalPresentSince) >= reconnectSettleSeconds else {
             return
         }
         do {
             try configure(displayID: displayID, online: false)
+            reconcileErrors.reset()
             printStatus("External display is ready; built-in display turned off again.")
         } catch {
-            printStatus("displayctl: could not turn off the built-in display yet: \(error)", toError: true)
+            printReconcileErrorOnce("displayctl: could not turn off the built-in display yet: \(error)")
         }
+    }
+
+    private func printReconcileErrorOnce(_ message: String) {
+        guard reconcileErrors.shouldReport(message) else { return }
+        printStatus("\(message) Retrying automatically; duplicate warnings will be suppressed until recovery.", toError: true)
     }
 
     private func printStatus(_ message: String, toError: Bool = false) {
@@ -491,6 +517,7 @@ private func restoreDelay(from arguments: [String]) throws -> TimeInterval? {
     return seconds
 }
 
+// MARK: Command-line entry point
 do {
     let arguments = Array(CommandLine.arguments.dropFirst())
     guard let command = arguments.first else { throw ToolError.invalidArguments }
