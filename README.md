@@ -104,6 +104,18 @@ MonitorControl can still be used manually, but its slider may retain its previou
 value after another tool changes hardware brightness. Software dimming is not
 changed by this rule.
 
+For the ASUS XG32UCWMG setup, install the tested upstream helper with
+`bash scripts/install-brightness-helper.sh`, then run `displayctl brightness-install`.
+This pins upstream revision `04d949794102eb8df01ad3681afff6464a3eede2` in
+`~/.local/libexec/displayctl/m1ddc`, which takes precedence over Homebrew's version.
+The successful manual test used this helper's unqualified `set luminance 100`
+command. The rule uses that default connection when there is exactly one physical
+external display and it is the main display; otherwise it selects by UUID.
+On this ASUS setup, UUID-selected writes returned success without a visible
+change and brightness reads returned zero. Verify visible behavior when changing
+the connection or helper; exit status alone is insufficient. The default connection
+and newer helper were tested together, so their individual effects are unconfirmed.
+
 To stop the rule (including future logins):
 
 ```sh

@@ -553,6 +553,9 @@ private func restoreDelay(from arguments: [String]) throws -> TimeInterval? {
 private struct BrightnessDisplay: Codable {
     let id: CGDirectDisplayID
     let uuid: String
+    let useDefaultConnection: Bool
+
+    var ddcArguments: [String] { useDefaultConnection ? [] : ["display", uuid] }
 }
 
 private struct DailyBrightnessRule {
@@ -627,11 +630,15 @@ private func capture(_ executable: String, _ arguments: [String]) throws -> Stri
 
 private func brightnessProbe() throws {
     let api = PrivateDisplayAPI()
-    let displays = api.onlineDisplayIDs().compactMap { id -> BrightnessDisplay? in
-        guard api.physicalExternalName(displayID: id) != nil,
-              CGDisplayIsActive(id) != 0, CGDisplayIsAsleep(id) == 0,
+    let physical = api.onlineDisplayIDs().filter { api.physicalExternalName(displayID: $0) != nil }
+    let displays = physical.compactMap { id -> BrightnessDisplay? in
+        guard CGDisplayIsActive(id) != 0, CGDisplayIsAsleep(id) == 0,
               let uuid = api.createUUID?(id)?.takeRetainedValue() else { return nil }
-        return BrightnessDisplay(id: id, uuid: CFUUIDCreateString(nil, uuid) as String)
+        // The ASUS setup accepts the default IOAVService connection even when
+        // UUID-selected writes silently do nothing. Avoid ambiguous defaults
+        // with multiple physical monitors, including sleeping ones.
+        return BrightnessDisplay(id: id, uuid: CFUUIDCreateString(nil, uuid) as String,
+                                 useDefaultConnection: physical.count == 1 && CGDisplayIsMain(id) != 0)
     }
     print(String(decoding: try JSONEncoder().encode(displays), as: UTF8.self))
 }
@@ -655,7 +662,9 @@ private func brightnessWatch() throws -> Never {
         throw BrightnessError.commandFailed("Could not resolve displayctl executable")
     }
     let executable = String(cString: path)
-    guard let ddc = ["/opt/homebrew/bin/m1ddc", "/usr/local/bin/m1ddc"].first(where: {
+    let testedHelper = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/libexec/displayctl/m1ddc").path
+    guard let ddc = [testedHelper, "/opt/homebrew/bin/m1ddc", "/usr/local/bin/m1ddc"].first(where: {
         FileManager.default.isExecutableFile(atPath: $0)
     }) else { throw BrightnessError.commandFailed("Install m1ddc with `brew install m1ddc` first.") }
     var errors = ReconcileErrorLog()
@@ -670,15 +679,17 @@ private func brightnessWatch() throws -> Never {
                                uptime: ProcessInfo.processInfo.systemUptime)
             for uuid in due {
                 do {
-                    let maxValue = Int(try capture(ddc, ["display", uuid, "max", "luminance"])) ?? 0
+                    guard let display = displays.first(where: { $0.uuid == uuid }) else { continue }
+                    let arguments = display.ddcArguments
+                    let maxValue = Int(try capture(ddc, arguments + ["max", "luminance"])) ?? 0
                     // Some monitors accept writes but report 0 for every read.
                     let maximum = maxValue > 0 ? maxValue : 100
-                    _ = try capture(ddc, ["display", uuid, "set", "luminance", String(maximum)])
+                    _ = try capture(ddc, arguments + ["set", "luminance", String(maximum)])
                     var saved = rule
                     saved.succeeded(uuid, now: Date())
                     try JSONEncoder().encode(saved.completed).write(to: stateURL, options: .atomic)
                     rule = saved
-                    print("Sent maximum brightness (\(maximum)) to \(uuid).")
+                    print("Sent maximum brightness (\(maximum)) to \(uuid) using \(display.useDefaultConnection ? "default connection" : "UUID selection") via \(ddc).")
                     fflush(stdout)
                     errors.reset()
                 } catch {

@@ -12,6 +12,10 @@ import unittest
 class RetryErrorTests(unittest.TestCase):
     def test_daily_brightness_schedule(self):
         self.run_swift(r'''
+private let single = BrightnessDisplay(id: 2, uuid: "external", useDefaultConnection: true)
+precondition(single.ddcArguments + ["set", "luminance", "100"] == ["set", "luminance", "100"])
+private let multiple = BrightnessDisplay(id: 3, uuid: "other", useDefaultConnection: false)
+precondition(multiple.ddcArguments == ["display", "other"])
 var calendar = Calendar(identifier: .gregorian)
 calendar.timeZone = TimeZone(identifier: "America/Vancouver")!
 let morning = calendar.date(from: DateComponents(year: 2026, month: 9, day: 14, hour: 8))!
