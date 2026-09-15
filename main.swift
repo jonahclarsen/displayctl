@@ -581,7 +581,9 @@ private struct DailyBrightnessRule {
         pendingDay = day
         previousTick = uptime
         previousDate = now
-        guard calendar.component(.hour, from: now) >= 8 else {
+        let minutesSinceMidnight = calendar.component(.hour, from: now) * 60
+            + calendar.component(.minute, from: now)
+        guard minutesSinceMidnight >= 6 * 60 + 30 else {
             pending.removeAll()
             return []
         }
@@ -668,7 +670,7 @@ private func brightnessWatch() throws -> Never {
         FileManager.default.isExecutableFile(atPath: $0)
     }) else { throw BrightnessError.commandFailed("Install m1ddc with `brew install m1ddc` first.") }
     var errors = ReconcileErrorLog()
-    print("Daily brightness rule active: external monitors to maximum, five seconds after availability at/after 08:00 local time.")
+    print("Daily brightness rule active: external monitors to maximum, five seconds after availability at/after 06:30 local time.")
     fflush(stdout)
     while true {
         do {

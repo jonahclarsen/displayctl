@@ -18,15 +18,15 @@ private let multiple = BrightnessDisplay(id: 3, uuid: "other", useDefaultConnect
 precondition(multiple.ddcArguments == ["display", "other"])
 var calendar = Calendar(identifier: .gregorian)
 calendar.timeZone = TimeZone(identifier: "America/Vancouver")!
-let morning = calendar.date(from: DateComponents(year: 2026, month: 9, day: 14, hour: 8))!
+let morning = calendar.date(from: DateComponents(year: 2026, month: 9, day: 14, hour: 6, minute: 30))!
 private var rule = DailyBrightnessRule()
 func tick(_ seconds: Double, _ displays: [String] = ["A"]) -> [String] {
     rule.due(displays: displays, now: morning.addingTimeInterval(seconds),
              uptime: seconds + 100, calendar: calendar)
 }
-precondition(tick(-1).isEmpty)
+for second in -10..<0 { precondition(tick(Double(second)).isEmpty, "Do not trigger during 06:29") }
 for second in 0..<5 { precondition(tick(Double(second)).isEmpty) }
-precondition(tick(5) == ["A"], "Connected at 8:00 must wait five seconds")
+precondition(tick(5) == ["A"], "Connected at 06:30 must wait five seconds")
 rule.succeeded("A", now: morning.addingTimeInterval(5), calendar: calendar)
 precondition(tick(6).isEmpty)
 precondition(tick(7, []).isEmpty)
@@ -38,7 +38,7 @@ rule = DailyBrightnessRule()
 rule.completed = try JSONDecoder().decode([String: String].self, from: encoded)
 precondition(tick(15).isEmpty, "Restart must not repeat a completed day")
 
-// A second monitor arriving at 9 a.m. has its own delay.
+// A second monitor arriving at 7:30 a.m. has its own delay.
 for second in 3600..<3605 { precondition(tick(Double(second), ["A", "B"]).isEmpty) }
 precondition(tick(3605, ["A", "B"]) == ["B"])
 
@@ -60,7 +60,7 @@ for second in 7200..<7205 { precondition(tick(Double(second)).isEmpty) }
 precondition(tick(7205) == ["A"])
 rule.succeeded("A", now: morning.addingTimeInterval(7205), calendar: calendar)
 
-// Next day resets automatically, but nothing happens before 08:00.
+// Next day resets automatically, but nothing happens before 06:30.
 precondition(tick(86400 - 1).isEmpty)
 for second in 86400..<86405 { precondition(tick(Double(second)).isEmpty) }
 precondition(tick(86405) == ["A"])

@@ -77,9 +77,9 @@ install -m 755 displayctl "$HOME/.local/bin/displayctl"
 displayctl brightness-install
 ```
 
-Every day at or after 8 a.m. local time, each awake physical external monitor
+Every day at or after 6:30 a.m. local time, each awake physical external monitor
 gets a maximum-brightness command after five seconds of continuous availability.
-A monitor already connected at 8 a.m. is adjusted around 8:00:05; one first
+A monitor already connected at 6:30 a.m. is adjusted around 6:30:05; one first
 connected at 9 a.m. is adjusted around 9:00:05. Detection polls every half second.
 Unplugging or sleeping during the delay starts a fresh delay on reconnect/wake.
 The Mac must be awake and logged in; a missed morning runs after wake/login.
@@ -87,7 +87,7 @@ The Mac must be awake and logged in; a missed morning runs after wake/login.
 Successful commands are remembered per monitor and local calendar day in
 `~/.local/state/displayctl/brightness.json`, including across restarts. Lowering
 brightness or reconnecting afterward does not trigger another adjustment that day.
-Enabling the rule after 8 a.m. also triggers today's adjustment.
+Enabling the rule after 6:30 a.m. also triggers today's adjustment.
 
 This runs independently of `displayctl off`, starts at login, and leaves the
 built-in panel alone. The LaunchAgent is
