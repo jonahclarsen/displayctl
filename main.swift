@@ -16,6 +16,8 @@ private typealias CreateDisplayInfo = @convention(c) (
     CGDirectDisplayID
 ) -> Unmanaged<CFDictionary>?
 
+private typealias CreateDisplayUUID = @convention(c) (CGDirectDisplayID) -> Unmanaged<CFUUID>?
+
 private enum ToolError: Error, CustomStringConvertible {
     case privateAPIUnavailable
     case noBuiltInDisplay
@@ -33,6 +35,8 @@ private enum ToolError: Error, CustomStringConvertible {
       displayctl list
       displayctl off [--restore-after SECONDS]
       displayctl on
+      displayctl brightness-install
+      displayctl brightness-watch
 
     `off` stays running as a dock supervisor. It restores the built-in panel when
     every physical external disappears and turns it off again after one reconnects.
@@ -70,6 +74,7 @@ private final class PrivateDisplayAPI {
     let setEnabled: ConfigureDisplayEnabled?
     private let getAll: GetDisplayList?
     private let createInfo: CreateDisplayInfo?
+    let createUUID: CreateDisplayUUID?
 
     init() {
         let paths: [String?] = [
@@ -94,6 +99,7 @@ private final class PrivateDisplayAPI {
             names: ["CoreDisplay_DisplayCreateInfoDictionary"],
             as: CreateDisplayInfo.self
         )
+        createUUID = Self.resolve(handles, names: ["CGDisplayCreateUUIDFromDisplayID"], as: CreateDisplayUUID.self)
     }
 
     deinit {
@@ -542,6 +548,178 @@ private func restoreDelay(from arguments: [String]) throws -> TimeInterval? {
     return seconds
 }
 
+// MARK: Daily external brightness rule (independent of the dock supervisor)
+
+private struct BrightnessDisplay: Codable {
+    let id: CGDirectDisplayID
+    let uuid: String
+}
+
+private struct DailyBrightnessRule {
+    var completed: [String: String] = [:]
+    private var pending: [String: TimeInterval] = [:]
+    private var previousTick: TimeInterval?
+    private var previousDate: Date?
+    private var pendingDay: String?
+
+    static func day(_ now: Date, calendar: Calendar) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: now)
+        return "\(parts.year!)-\(parts.month!)-\(parts.day!)"
+    }
+
+    mutating func due(displays: [String], now: Date, uptime: TimeInterval,
+                      calendar: Calendar = .autoupdatingCurrent) -> [String] {
+        let day = Self.day(now, calendar: calendar)
+        // A scheduling gap (including sleep) requires a new five-second wait.
+        if pendingDay != day || previousTick.map({ uptime - $0 > 2 }) == true
+            || previousDate.map({ now.timeIntervalSince($0) > 2 || now < $0 }) == true {
+            pending.removeAll()
+        }
+        pendingDay = day
+        previousTick = uptime
+        previousDate = now
+        guard calendar.component(.hour, from: now) >= 8 else {
+            pending.removeAll()
+            return []
+        }
+        let eligible = Set(displays.filter { completed[$0] != day })
+        pending = pending.filter { eligible.contains($0.key) }
+        for uuid in eligible where pending[uuid] == nil { pending[uuid] = uptime }
+        return eligible.filter { uptime - pending[$0]! >= 5 }.sorted()
+    }
+
+    mutating func succeeded(_ uuid: String, now: Date, calendar: Calendar = .autoupdatingCurrent) {
+        completed[uuid] = Self.day(now, calendar: calendar)
+        pending.removeValue(forKey: uuid)
+    }
+
+    mutating func retry(_ uuid: String, uptime: TimeInterval) {
+        pending[uuid] = uptime + 25 // Retry failures after 30 seconds.
+    }
+}
+
+private enum BrightnessError: Error {
+    case commandFailed(String)
+    case alreadyRunning
+}
+
+private func capture(_ executable: String, _ arguments: [String]) throws -> String {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    // All commands used here produce small output. Bound hung DDC/probe calls.
+    let deadline = ProcessInfo.processInfo.systemUptime + 10
+    while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    process.waitUntilExit()
+    guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+        throw BrightnessError.commandFailed("\(executable) \(arguments.joined(separator: " "))")
+    }
+    return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func brightnessProbe() throws {
+    let api = PrivateDisplayAPI()
+    let displays = api.onlineDisplayIDs().compactMap { id -> BrightnessDisplay? in
+        guard api.physicalExternalName(displayID: id) != nil,
+              CGDisplayIsActive(id) != 0, CGDisplayIsAsleep(id) == 0,
+              let uuid = api.createUUID?(id)?.takeRetainedValue() else { return nil }
+        return BrightnessDisplay(id: id, uuid: CFUUIDCreateString(nil, uuid) as String)
+    }
+    print(String(decoding: try JSONEncoder().encode(displays), as: UTF8.self))
+}
+
+private func brightnessWatch() throws -> Never {
+    let directory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/state/displayctl", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let lock = open(directory.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o600)
+    guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw BrightnessError.alreadyRunning }
+    defer { close(lock) }
+    let stateURL = directory.appendingPathComponent("brightness.json")
+    var rule = DailyBrightnessRule()
+    if FileManager.default.fileExists(atPath: stateURL.path) {
+        rule.completed = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: stateURL))
+    }
+    var pathSize: UInt32 = 0
+    _NSGetExecutablePath(nil, &pathSize)
+    var path = [CChar](repeating: 0, count: Int(pathSize))
+    guard _NSGetExecutablePath(&path, &pathSize) == 0 else {
+        throw BrightnessError.commandFailed("Could not resolve displayctl executable")
+    }
+    let executable = String(cString: path)
+    guard let ddc = ["/opt/homebrew/bin/m1ddc", "/usr/local/bin/m1ddc"].first(where: {
+        FileManager.default.isExecutableFile(atPath: $0)
+    }) else { throw BrightnessError.commandFailed("Install m1ddc with `brew install m1ddc` first.") }
+    var errors = ReconcileErrorLog()
+    print("Daily brightness rule active: external monitors to maximum, five seconds after availability at/after 08:00 local time.")
+    fflush(stdout)
+    while true {
+        do {
+            // Fresh processes avoid stale WindowServer topology after reconnects.
+            let json = try capture(executable, ["probe-brightness-displays"])
+            let displays = try JSONDecoder().decode([BrightnessDisplay].self, from: Data(json.utf8))
+            let due = rule.due(displays: displays.map(\.uuid), now: Date(),
+                               uptime: ProcessInfo.processInfo.systemUptime)
+            for uuid in due {
+                do {
+                    let maxValue = Int(try capture(ddc, ["display", uuid, "max", "luminance"])) ?? 0
+                    // Some monitors accept writes but report 0 for every read.
+                    let maximum = maxValue > 0 ? maxValue : 100
+                    _ = try capture(ddc, ["display", uuid, "set", "luminance", String(maximum)])
+                    var saved = rule
+                    saved.succeeded(uuid, now: Date())
+                    try JSONEncoder().encode(saved.completed).write(to: stateURL, options: .atomic)
+                    rule = saved
+                    print("Sent maximum brightness (\(maximum)) to \(uuid).")
+                    fflush(stdout)
+                    errors.reset()
+                } catch {
+                    rule.retry(uuid, uptime: ProcessInfo.processInfo.systemUptime)
+                    let message = "displayctl brightness: \(error)"
+                    if errors.shouldReport(message) { fputs(message + "\n", stderr) }
+                }
+            }
+        } catch {
+            let message = "displayctl brightness: \(error)"
+            if errors.shouldReport(message) { fputs(message + "\n", stderr) }
+            // A failed probe must break the continuous availability interval.
+            _ = rule.due(displays: [], now: Date(), uptime: ProcessInfo.processInfo.systemUptime)
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+}
+
+private func installBrightnessRule() throws {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let binary = home.appendingPathComponent(".local/bin/displayctl").path
+    let logs = home.appendingPathComponent(".local/state/displayctl", isDirectory: true)
+    let agents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+    let label = "com.jonahclarsen.displayctl-brightness"
+    let plist = agents.appendingPathComponent(label + ".plist")
+    let configuration: [String: Any] = [
+        "Label": label, "ProgramArguments": [binary, "brightness-watch"],
+        "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 30,
+        "StandardOutPath": logs.appendingPathComponent("brightness.log").path,
+        "StandardErrorPath": logs.appendingPathComponent("brightness-error.log").path,
+    ]
+    let data = try PropertyListSerialization.data(fromPropertyList: configuration, format: .xml, options: 0)
+    try data.write(to: plist, options: .atomic)
+    let domain = "gui/\(getuid())"
+    _ = try? capture("/bin/launchctl", ["bootout", domain + "/" + label])
+    _ = try capture("/bin/launchctl", ["bootstrap", domain, plist.path])
+    print("Installed and started daily brightness rule. It will start automatically at login.")
+}
+
 // MARK: Command-line entry point
 do {
     let arguments = Array(CommandLine.arguments.dropFirst())
@@ -549,6 +727,12 @@ do {
     let controller = DisplayController()
 
     switch command {
+    case "brightness-install" where arguments.count == 1:
+        try installBrightnessRule()
+    case "brightness-watch" where arguments.count == 1:
+        try brightnessWatch()
+    case "probe-brightness-displays" where arguments.count == 1:
+        try brightnessProbe()
     case "list" where arguments.count == 1,
          "status" where arguments.count == 1:
         controller.list()

@@ -10,6 +10,66 @@ import unittest
 
 
 class RetryErrorTests(unittest.TestCase):
+    def test_daily_brightness_schedule(self):
+        self.run_swift(r'''
+var calendar = Calendar(identifier: .gregorian)
+calendar.timeZone = TimeZone(identifier: "America/Vancouver")!
+let morning = calendar.date(from: DateComponents(year: 2026, month: 9, day: 14, hour: 8))!
+private var rule = DailyBrightnessRule()
+func tick(_ seconds: Double, _ displays: [String] = ["A"]) -> [String] {
+    rule.due(displays: displays, now: morning.addingTimeInterval(seconds),
+             uptime: seconds + 100, calendar: calendar)
+}
+precondition(tick(-1).isEmpty)
+for second in 0..<5 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(5) == ["A"], "Connected at 8:00 must wait five seconds")
+rule.succeeded("A", now: morning.addingTimeInterval(5), calendar: calendar)
+precondition(tick(6).isEmpty)
+precondition(tick(7, []).isEmpty)
+for second in 8...14 { precondition(tick(Double(second)).isEmpty) }
+
+// Persistence uses stable monitor UUIDs, not transient display IDs.
+let encoded = try JSONEncoder().encode(rule.completed)
+rule = DailyBrightnessRule()
+rule.completed = try JSONDecoder().decode([String: String].self, from: encoded)
+precondition(tick(15).isEmpty, "Restart must not repeat a completed day")
+
+// A second monitor arriving at 9 a.m. has its own delay.
+for second in 3600..<3605 { precondition(tick(Double(second), ["A", "B"]).isEmpty) }
+precondition(tick(3605, ["A", "B"]) == ["B"])
+
+// Disconnect cancels a pending adjustment; reconnect starts from zero.
+rule = DailyBrightnessRule()
+for second in 3600...3603 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(3604, []).isEmpty)
+for second in 3605..<3610 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(3610) == ["A"])
+rule.retry("A", uptime: 3710)
+for second in 3611..<3640 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(3640) == ["A"], "Failed writes retry after 30 seconds")
+
+// Sleep or missed polling must not count toward the delay.
+rule = DailyBrightnessRule()
+precondition(tick(3600).isEmpty)
+precondition(tick(3601).isEmpty)
+for second in 7200..<7205 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(7205) == ["A"])
+rule.succeeded("A", now: morning.addingTimeInterval(7205), calendar: calendar)
+
+// Next day resets automatically, but nothing happens before 08:00.
+precondition(tick(86400 - 1).isEmpty)
+for second in 86400..<86405 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(86405) == ["A"])
+
+// Clock changes cannot cause an early firing.
+rule = DailyBrightnessRule()
+precondition(tick(3600).isEmpty)
+precondition(tick(3601).isEmpty)
+precondition(tick(-10).isEmpty)
+for second in 0..<5 { precondition(tick(Double(second)).isEmpty) }
+precondition(tick(5) == ["A"])
+''')
+
     def run_swift(self, harness):
         source = (Path(__file__).resolve().parents[1] / "main.swift").read_text()
         definitions, marker, _ = source.partition("// MARK: Command-line entry point")
