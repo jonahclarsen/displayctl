@@ -1,11 +1,15 @@
 # Repository Instructions
 
-- After every repository change, rebuild and install `displayctl` in the user executable directory:
+- After every change, rebuild and relaunch the menu bar app in dev mode:
 
   ```sh
-  swiftc main.swift -o displayctl
-  install -m 755 displayctl "$HOME/.local/bin/displayctl"
+  pnpm relaunch
   ```
 
-  `$HOME/.local/bin` is on the user's Bash `PATH`.
-- After every repository change, commit the change and push the commit to the current remote branch.
+  This restarts the `com.jonahclarsen.displayctl-dev` LaunchAgent, which rebuilds the
+  `displayctl` CLI (also installing it to `~/.local/bin`) and runs `pnpm tauri dev`.
+  Confirm it came back up in `~/Library/Logs/displayctl/dev.log` and `app.log`.
+  After changing `launcher/` or `scripts/install-launch-agent.sh`, run
+  `scripts/install-launch-agent.sh` instead.
+- After every change, commit it and push the commit to the current remote branch.
+- The repository is public: never commit signing identities, personal paths, or logs.

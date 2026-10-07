@@ -1,0 +1,30 @@
+[package]
+name = "displayctl-menubar"
+version = "0.1.0"
+description = "Menu bar toggle for displayctl"
+edition = "2021"
+
+[lib]
+name = "displayctl_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "displayctl-menubar"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
+log = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+
+[dev-dependencies]
+png = "0.17"

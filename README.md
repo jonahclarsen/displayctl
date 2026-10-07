@@ -66,6 +66,34 @@ displayctl on
 
 Recovery state is stored at `~/.local/state/displayctl/recovery.json`. If a previous supervisor was interrupted, the next `off` invocation uses this record to recover safely before continuing.
 
+## Menu bar app
+
+A Tauri/Svelte menu bar app wraps `displayctl off` / `displayctl on`. Its icon is a
+laptop seen from the side:
+
+- lid open, glowing: built-in display on
+- lid half shut, pulsing in the popover: supervisor running, waiting for an external monitor
+- lid shut: built-in display off
+
+Click the icon for a one-button popover, press Control-Shift-D anywhere, or run
+`pkill -USR1 displayctl-menubar` to toggle. Right-click for Quit. The supervisor runs
+in its own process group, so it keeps going across app restarts, and the app resumes
+it at login if the display was off.
+
+It runs in dev mode (debug build, verbose logs) at login:
+
+```sh
+pnpm install
+scripts/install-launch-agent.sh   # start now and at every login
+pnpm relaunch                     # rebuild and restart after changes
+scripts/uninstall-launch-agent.sh
+```
+
+The LaunchAgent starts `~/Applications/displayctl.app`, a small launcher that shows up
+as "displayctl" in System Settings → General → Login Items and holds the one-time
+Documents folder permission for the dev toolchain. Logs are in `~/Library/Logs/displayctl/`:
+`app.log` (the app), `supervisor.log` (`displayctl off` output), and `dev.log` (build output).
+
 ## Daily morning brightness
 
 On Apple Silicon Macs, install [m1ddc](https://github.com/waydabber/m1ddc) and enable the background rule:

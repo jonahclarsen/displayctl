@@ -1,0 +1,36 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "displayctl",
+  "version": "0.1.0",
+  "identifier": "com.jonahclarsen.displayctl",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:5187",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "popover",
+        "title": "displayctl",
+        "width": 112,
+        "height": 112,
+        "visible": false,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": true,
+        "windowEffects": { "effects": ["popover"], "state": "active", "radius": 22 }
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.png"]
+  }
+}
