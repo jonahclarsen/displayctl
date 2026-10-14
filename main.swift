@@ -28,6 +28,7 @@ private enum ToolError: Error, CustomStringConvertible {
     case verification(CGDirectDisplayID, expectedOnline: Bool)
     case nothingToRestore
     case watchdogAlreadyRunning(Int32)
+    case freshProcess(String)
     case invalidArguments
 
     static let usage = """
@@ -63,6 +64,8 @@ private enum ToolError: Error, CustomStringConvertible {
             return "No offline built-in display or recovery record was found."
         case let .watchdogAlreadyRunning(pid):
             return "An external-only watchdog is already running (PID \(pid)). Use `displayctl on` or stop that command with Control-C."
+        case let .freshProcess(message):
+            return message
         case .invalidArguments:
             return Self.usage
         }
@@ -163,6 +166,14 @@ private final class PrivateDisplayAPI {
         }
         return name
     }
+}
+
+private func currentExecutablePath() -> String? {
+    var size: UInt32 = 0
+    _NSGetExecutablePath(nil, &size)
+    var path = [CChar](repeating: 0, count: Int(size))
+    guard _NSGetExecutablePath(&path, &size) == 0 else { return nil }
+    return String(cString: path)
 }
 
 private struct RecoveryRecord: Codable {
@@ -346,7 +357,7 @@ private final class DisplayController {
             externalState: externalState,
             builtInOnline: CGDisplayIsOnline(displayID) != 0
         ) { online in
-            try configure(displayID: displayID, online: online)
+            try configureInFreshProcess(displayID: displayID, online: online)
         }
     }
 
@@ -412,13 +423,10 @@ private final class DisplayController {
     }
 
     private func freshProcessExternalDisplayState() -> ExternalDisplayState {
-        var pathBufferSize: UInt32 = 0
-        _NSGetExecutablePath(nil, &pathBufferSize)
-        var pathBuffer = [CChar](repeating: 0, count: Int(pathBufferSize))
-        guard _NSGetExecutablePath(&pathBuffer, &pathBufferSize) == 0 else { return .absent }
+        guard let executable = currentExecutablePath() else { return .absent }
 
         let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: String(cString: pathBuffer))
+        probe.executableURL = URL(fileURLWithPath: executable)
         probe.arguments = ["probe-external-state"]
         probe.standardOutput = FileHandle.nullDevice
         probe.standardError = FileHandle.nullDevice
@@ -432,6 +440,37 @@ private final class DisplayController {
             // bring the built-in display back rather than risk a black desktop.
             return .absent
         }
+    }
+
+    // After sleep, the supervisor's own WindowServer connection can go stale:
+    // in-process changes then fail (CoreGraphics error 1001) on every retry for
+    // hours, while a new process succeeds at once. Make each change from one.
+    private func configureInFreshProcess(displayID: CGDirectDisplayID, online: Bool) throws {
+        guard let executable = currentExecutablePath() else {
+            return try configure(displayID: displayID, online: online)
+        }
+        let child = Process()
+        let errors = Pipe()
+        child.executableURL = URL(fileURLWithPath: executable)
+        child.arguments = ["set-built-in", String(displayID), online ? "on" : "off"]
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = errors
+        do {
+            try child.run()
+        } catch {
+            return try configure(displayID: displayID, online: online)
+        }
+        let output = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        child.waitUntilExit()
+        guard child.terminationReason == .exit, child.terminationStatus == 0 else {
+            var message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if message.hasPrefix("displayctl: ") { message.removeFirst("displayctl: ".count) }
+            throw ToolError.freshProcess(message.isEmpty ? "set-built-in exited with status \(child.terminationStatus)." : message)
+        }
+    }
+
+    func setBuiltIn(displayID: CGDirectDisplayID, online: Bool) throws {
+        try configure(displayID: displayID, online: online)
     }
 
     private func registerDisplayCallback() {
@@ -525,7 +564,7 @@ private final class DisplayController {
                 displayCallbackRegistered = false
             }
             if CGDisplayIsOnline(displayID) == 0 {
-                try configure(displayID: displayID, online: true)
+                try configureInFreshProcess(displayID: displayID, online: true)
             }
             try clearRecovery()
             print(message)
@@ -657,13 +696,9 @@ private func brightnessWatch() throws -> Never {
     if FileManager.default.fileExists(atPath: stateURL.path) {
         rule.completed = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: stateURL))
     }
-    var pathSize: UInt32 = 0
-    _NSGetExecutablePath(nil, &pathSize)
-    var path = [CChar](repeating: 0, count: Int(pathSize))
-    guard _NSGetExecutablePath(&path, &pathSize) == 0 else {
+    guard let executable = currentExecutablePath() else {
         throw BrightnessError.commandFailed("Could not resolve displayctl executable")
     }
-    let executable = String(cString: path)
     let testedHelper = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/libexec/displayctl/m1ddc").path
     guard let ddc = [testedHelper, "/opt/homebrew/bin/m1ddc", "/usr/local/bin/m1ddc"].first(where: {
@@ -758,6 +793,11 @@ do {
         exit(controller.probeExternalDisplay() == .ready ? EXIT_SUCCESS : EXIT_FAILURE)
     case "probe-external-state" where arguments.count == 1:
         exit(controller.probeExternalDisplay().rawValue)
+    case "set-built-in" where arguments.count == 3:
+        guard let id = CGDirectDisplayID(arguments[1]), ["on", "off"].contains(arguments[2]) else {
+            throw ToolError.invalidArguments
+        }
+        try controller.setBuiltIn(displayID: id, online: arguments[2] == "on")
     default:
         throw ToolError.invalidArguments
     }
