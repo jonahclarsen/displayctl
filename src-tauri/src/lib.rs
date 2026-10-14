@@ -22,6 +22,7 @@ use tauri_plugin_global_shortcut::ShortcutState;
 
 const SHORTCUT: &str = "ctrl+shift+d";
 const POLL: Duration = Duration::from_millis(250);
+const REFRESH_RATE_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,7 +128,6 @@ fn toggle(app: &AppHandle) {
 }
 
 fn refresh(app: &AppHandle) {
-    refresh_rate(app);
     let (state, _) = current_state();
     let controller = app.state::<Controller>();
     let mut previous = controller.state.lock().unwrap();
@@ -284,6 +284,12 @@ pub fn run() {
             thread::spawn(move || loop {
                 thread::sleep(POLL);
                 refresh(&poller);
+            });
+
+            let poller = handle.clone();
+            thread::spawn(move || loop {
+                thread::sleep(REFRESH_RATE_POLL);
+                refresh_rate(&poller);
             });
 
             if let Some(window) = app.get_webview_window("popover") {

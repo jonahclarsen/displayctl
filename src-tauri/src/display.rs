@@ -95,3 +95,28 @@ pub fn start_supervisor() -> io::Result<Child> {
 pub fn restore() -> io::Result<Output> {
     Command::new(binary()).arg("on").stdin(Stdio::null()).output()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Time per call of the checks the menu bar app polls:
+    /// `cargo test --release poll_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn poll_cost() {
+        fn time<T>(name: &str, mut check: impl FnMut() -> T) {
+            const CALLS: u32 = 2000;
+            check();
+            let started = Instant::now();
+            for _ in 0..CALLS {
+                std::hint::black_box(check());
+            }
+            println!("{name}: {:?} per call", started.elapsed() / CALLS);
+        }
+        time("main_refresh_rate", main_refresh_rate);
+        time("built_in_online", built_in_online);
+        time("supervisor_pid", supervisor_pid);
+    }
+}
