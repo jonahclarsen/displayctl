@@ -12,6 +12,10 @@ use std::{
 extern "C" {
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayIsBuiltin(display: u32) -> u32;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayCopyDisplayMode(display: u32) -> *mut std::ffi::c_void;
+    fn CGDisplayModeGetRefreshRate(mode: *mut std::ffi::c_void) -> f64;
+    fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
 }
 
 fn home() -> PathBuf {
@@ -40,6 +44,22 @@ pub fn built_in_online() -> bool {
         return true;
     }
     displays[..count as usize].iter().any(|&id| unsafe { CGDisplayIsBuiltin(id) } != 0)
+}
+
+/// Refresh rate of the main display (the one with the menu bar), rounded to whole hertz.
+/// None when CoreGraphics doesn't report one, as with some fixed-rate built-in panels.
+pub fn main_refresh_rate() -> Option<u32> {
+    // SAFETY: the mode is released after reading it; a null mode is never dereferenced.
+    let rate = unsafe {
+        let mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+        if mode.is_null() {
+            return None;
+        }
+        let rate = CGDisplayModeGetRefreshRate(mode);
+        CGDisplayModeRelease(mode);
+        rate
+    };
+    (rate >= 1.0).then(|| rate.round() as u32)
 }
 
 #[derive(serde::Deserialize)]

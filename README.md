@@ -75,6 +75,8 @@ laptop seen from the side:
 - lid half shut, pulsing in the popover: supervisor running, waiting for an external monitor
 - lid shut: built-in display off
 
+The number beside it is the main display's current refresh rate in hertz.
+
 Click the icon for a one-button popover, press Control-Shift-D anywhere, or run
 `pkill -USR1 displayctl-menubar` to toggle. Right-click for Quit. The supervisor runs
 in its own process group, so it keeps going across app restarts, and the app resumes

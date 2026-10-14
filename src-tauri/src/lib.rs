@@ -48,6 +48,8 @@ fn current_state() -> (State, bool) {
 struct Controller {
     busy: AtomicBool,
     state: Mutex<Option<State>>,
+    /// Main display refresh rate shown next to the icon; outer None until first read.
+    refresh_rate: Mutex<Option<Option<u32>>>,
     /// When the last toggle was requested, to log how long the display took to follow.
     requested: Mutex<Option<Instant>>,
     tray: Mutex<Option<TrayIcon>>,
@@ -125,6 +127,7 @@ fn toggle(app: &AppHandle) {
 }
 
 fn refresh(app: &AppHandle) {
+    refresh_rate(app);
     let (state, _) = current_state();
     let controller = app.state::<Controller>();
     let mut previous = controller.state.lock().unwrap();
@@ -141,6 +144,20 @@ fn refresh(app: &AppHandle) {
         let _ = tray.set_icon_as_template(true);
     }
     let _ = app.emit("state", state);
+}
+
+fn refresh_rate(app: &AppHandle) {
+    let rate = display::main_refresh_rate();
+    let controller = app.state::<Controller>();
+    let mut previous = controller.refresh_rate.lock().unwrap();
+    if *previous == Some(rate) {
+        return;
+    }
+    *previous = Some(rate);
+    if let Some(tray) = controller.tray.lock().unwrap().as_ref() {
+        let _ = tray.set_title(rate.map(|hz| hz.to_string()));
+    }
+    log::info!("main display refresh rate: {rate:?}");
 }
 
 fn toggle_popover(app: &AppHandle, rect: Rect) {
@@ -244,6 +261,7 @@ pub fn run() {
             *app.state::<Controller>().tray.lock().unwrap() = Some(tray);
             *app.state::<Controller>().state.lock().unwrap() = Some(state);
             log::info!("state: {state:?}");
+            refresh_rate(handle);
 
             if desired_off_path(handle).exists() && !supervising {
                 log::info!("restoring display-off from last session");
