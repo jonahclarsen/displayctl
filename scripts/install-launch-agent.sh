@@ -1,10 +1,12 @@
 #!/bin/zsh
-# Starts the menu bar app in dev mode now and at every login.
+# Starts the menu bar app in dev mode for this login session only.
 set -eu
 repo="${0:A:h:h}"
 label=com.jonahclarsen.displayctl-dev
 bundle_id=com.jonahclarsen.displayctl.launcher
-plist="$HOME/Library/LaunchAgents/$label.plist"
+# Deliberately outside LaunchAgents: reboot/logout must stop display control.
+plist="$HOME/Library/Application Support/displayctl/$label.plist"
+legacy_plist="$HOME/Library/LaunchAgents/$label.plist"
 logs="$HOME/Library/Logs/displayctl"
 app="$HOME/Applications/displayctl.app"
 mkdir -p "$logs" "${plist:h}"
@@ -87,5 +89,19 @@ cat > "$plist" <<PLIST
 PLIST
 
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$plist"
-echo "Installed $plist; logs in $logs"
+rm -f "$legacy_plist"
+# bootout returns before the old process tree has necessarily finished exiting.
+# launchd rejects an immediate replacement with EIO during that short window.
+started=false
+for attempt in {1..20}; do
+  if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+    started=true
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$started" != true ]]; then
+  echo "Could not start session-only job: $plist" >&2
+  exit 1
+fi
+echo "Started for this session only (no launch at login); logs in $logs"

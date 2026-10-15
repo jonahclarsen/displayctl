@@ -80,20 +80,31 @@ The number beside it is the main display's current refresh rate in hertz.
 Click the icon for a one-button popover, press Control-Shift-D anywhere, or run
 `pkill -USR1 displayctl-menubar` to toggle. Right-click for Quit. The supervisor runs
 in its own process group, so it keeps going across app restarts, and the app resumes
-it at login if the display was off.
+it when manually relaunched if the display was off.
 
-It runs in dev mode (debug build, verbose logs) at login:
+**Emergency off: Control–Option–Shift–D**, anywhere while the menu bar app is running.
+This always stops the supervisor and restores the built-in display; pressing it
+again never turns the display off. It is also in the right-click menu. For terminal
+recovery, run `displayctl on` or `pkill -USR2 displayctl-menubar`.
+Automation stays off until you explicitly toggle it back on.
+
+It runs in dev mode (debug build, verbose logs) only when manually started.
+It does **not** launch at login or after a reboot, so restarting the Mac is a
+recovery path. Display changes apply only to the current macOS session.
+
+Start it after login with:
 
 ```sh
 pnpm install
-scripts/install-launch-agent.sh   # start now and at every login
+scripts/install-launch-agent.sh   # start for this session; removes old login registration
 pnpm relaunch                     # rebuild and restart after changes
 scripts/uninstall-launch-agent.sh
 ```
 
-The LaunchAgent starts `~/Applications/displayctl.app`, a small launcher that shows up
-as "displayctl" in System Settings → General → Login Items and holds the one-time
-Documents folder permission for the dev toolchain. Logs are in `~/Library/Logs/displayctl/`:
+The session-only launchd job starts `~/Applications/displayctl.app`, a small launcher
+that holds the one-time Documents folder permission for the dev toolchain. Its job
+file lives in `~/Library/Application Support/displayctl/`, outside `LaunchAgents`,
+so macOS does not load it at login. Logs are in `~/Library/Logs/displayctl/`:
 `app.log` (the app), `supervisor.log` (`displayctl off` output), and `dev.log` (build output).
 
 ## Daily morning brightness
@@ -156,7 +167,7 @@ mv "$HOME/Library/LaunchAgents/com.jonahclarsen.displayctl-brightness.plist" "$H
 ## Limitations
 
 - Only a single built-in display is supported.
-- An active physical external display is required before external-only mode can start.
+- Without an active physical external display, the supervisor waits with the built-in panel on.
 - The behavior relies on private CoreGraphics/SkyLight symbols.
 
 ## License

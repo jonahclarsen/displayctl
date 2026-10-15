@@ -181,10 +181,16 @@ private struct RecoveryRecord: Codable {
     let watchdogPID: Int32?
 }
 
-private enum ExternalDisplayState: Int32 {
+private enum ExternalDisplayState: Int32, Codable {
     case ready = 0
     case absent = 1
     case inactive = 2
+}
+
+// Read both sides of the topology through the same fresh WindowServer connection.
+private struct DisplaySnapshot: Codable {
+    let externalState: ExternalDisplayState
+    let builtInOnline: Bool
 }
 
 private func displayReconfigurationCallback(
@@ -323,13 +329,26 @@ private final class DisplayController {
         let offlineBuiltIn = api.displayIDs().first {
             CGDisplayIsBuiltin($0) != 0 && CGDisplayIsOnline($0) == 0
         }
-        guard let id = recordedID ?? offlineBuiltIn else { throw ToolError.nothingToRestore }
+        guard let id = recordedID ?? offlineBuiltIn else {
+            // Emergency restoration is idempotent when the panel is already on.
+            if api.displayIDs().contains(where: { CGDisplayIsBuiltin($0) != 0 && CGDisplayIsOnline($0) != 0 }) {
+                print("Built-in display is already on.")
+                return
+            }
+            throw ToolError.nothingToRestore
+        }
 
         if let pid = record?.watchdogPID, pid != getpid(), processIsRunning(pid) {
             _ = kill(pid, SIGTERM)
             for _ in 0..<50 {
                 if CGDisplayIsOnline(id) != 0 && !processIsRunning(pid) { break }
                 Thread.sleep(forTimeInterval: 0.1)
+            }
+            // A blocked supervisor must not disable the display again after recovery.
+            if processIsRunning(pid) {
+                guard kill(pid, SIGKILL) == 0 || errno == ESRCH else {
+                    throw ToolError.freshProcess("Could not stop supervisor \(pid).")
+                }
             }
         }
         if CGDisplayIsOnline(id) == 0 {
@@ -352,10 +371,10 @@ private final class DisplayController {
 
     private func reconcileDisplayState(displayID: CGDirectDisplayID) {
         guard !restoring else { return }
-        let externalState = freshProcessExternalDisplayState()
+        let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
         reconcileDisplayState(
-            externalState: externalState,
-            builtInOnline: CGDisplayIsOnline(displayID) != 0
+            externalState: snapshot.externalState,
+            builtInOnline: snapshot.builtInOnline
         ) { online in
             try configureInFreshProcess(displayID: displayID, online: online)
         }
@@ -422,24 +441,33 @@ private final class DisplayController {
         }
     }
 
-    private func freshProcessExternalDisplayState() -> ExternalDisplayState {
-        guard let executable = currentExecutablePath() else { return .absent }
-
+    private func freshProcessDisplaySnapshot(displayID: CGDirectDisplayID) -> DisplaySnapshot {
+        // If probing fails, request restoration instead of trusting cached state.
+        let fallback = DisplaySnapshot(externalState: .absent, builtInOnline: false)
+        guard let executable = currentExecutablePath() else { return fallback }
         let probe = Process()
+        let output = Pipe()
         probe.executableURL = URL(fileURLWithPath: executable)
-        probe.arguments = ["probe-external-state"]
-        probe.standardOutput = FileHandle.nullDevice
+        probe.arguments = ["probe-display-state", String(displayID)]
+        probe.standardOutput = output
         probe.standardError = FileHandle.nullDevice
         do {
             try probe.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
             probe.waitUntilExit()
-            guard probe.terminationReason == .exit else { return .absent }
-            return ExternalDisplayState(rawValue: probe.terminationStatus) ?? .absent
+            guard probe.terminationReason == .exit, probe.terminationStatus == 0 else { return fallback }
+            return try JSONDecoder().decode(DisplaySnapshot.self, from: data)
         } catch {
-            // Safety wins: if current hardware presence cannot be established,
-            // bring the built-in display back rather than risk a black desktop.
-            return .absent
+            return fallback
         }
+    }
+
+    func probeDisplaySnapshot(displayID: CGDirectDisplayID) throws {
+        let snapshot = DisplaySnapshot(
+            externalState: probeExternalDisplay(),
+            builtInOnline: CGDisplayIsOnline(displayID) != 0
+        )
+        FileHandle.standardOutput.write(try JSONEncoder().encode(snapshot))
     }
 
     // After sleep, the supervisor's own WindowServer connection can go stale:
@@ -793,6 +821,9 @@ do {
         exit(controller.probeExternalDisplay() == .ready ? EXIT_SUCCESS : EXIT_FAILURE)
     case "probe-external-state" where arguments.count == 1:
         exit(controller.probeExternalDisplay().rawValue)
+    case "probe-display-state" where arguments.count == 2:
+        guard let id = CGDirectDisplayID(arguments[1]) else { throw ToolError.invalidArguments }
+        try controller.probeDisplaySnapshot(displayID: id)
     case "set-built-in" where arguments.count == 3:
         guard let id = CGDirectDisplayID(arguments[1]), ["on", "off"].contains(arguments[2]) else {
             throw ToolError.invalidArguments

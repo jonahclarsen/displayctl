@@ -5,7 +5,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
     thread,
@@ -21,6 +21,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::ShortcutState;
 
 const SHORTCUT: &str = "ctrl+shift+d";
+const EMERGENCY_SHORTCUT: &str = "ctrl+alt+shift+d";
 const POLL: Duration = Duration::from_millis(250);
 const REFRESH_RATE_POLL: Duration = Duration::from_secs(1);
 
@@ -48,6 +49,9 @@ fn current_state() -> (State, bool) {
 #[derive(Default)]
 struct Controller {
     busy: AtomicBool,
+    emergency_pending: AtomicBool,
+    stop_epoch: AtomicU64,
+    command: Mutex<()>,
     state: Mutex<Option<State>>,
     /// Main display refresh rate shown next to the icon; outer None until first read.
     refresh_rate: Mutex<Option<Option<u32>>>,
@@ -58,7 +62,7 @@ struct Controller {
     hidden_at: Mutex<Option<Instant>>,
 }
 
-/// Whether the supervisor should be running; restored at launch (e.g. after a reboot).
+/// Whether to resume the supervisor when the app is manually relaunched.
 fn desired_off_path(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().expect("no app data dir").join("display-off")
 }
@@ -83,6 +87,21 @@ fn start_supervisor(app: &AppHandle) {
         Ok(mut child) => {
             let pid = child.id();
             log::debug!("supervisor pid {pid}");
+            // Serialize emergency restore after the child has published its PID.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while display::supervisor_pid() != Some(pid as i32) {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    log::error!("supervisor did not publish recovery state; stopping it");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = display::restore();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
             let app = app.clone();
             thread::spawn(move || {
                 match child.wait() {
@@ -98,13 +117,22 @@ fn start_supervisor(app: &AppHandle) {
 
 fn toggle(app: &AppHandle) {
     let controller = app.state::<Controller>();
-    if controller.busy.swap(true, Ordering::SeqCst) {
+    let stop_epoch = controller.stop_epoch.load(Ordering::SeqCst);
+    if controller.emergency_pending.load(Ordering::SeqCst) || controller.busy.swap(true, Ordering::SeqCst) {
         log::debug!("toggle ignored: previous toggle still running");
         return;
     }
     *controller.requested.lock().unwrap() = Some(Instant::now());
     let app = app.clone();
     thread::spawn(move || {
+        let controller = app.state::<Controller>();
+        let _command = controller.command.lock().unwrap();
+        if controller.emergency_pending.load(Ordering::SeqCst)
+            || controller.stop_epoch.load(Ordering::SeqCst) != stop_epoch
+        {
+            controller.busy.store(false, Ordering::SeqCst);
+            return;
+        }
         let started = Instant::now();
         if let Some(pid) = display::supervisor_pid() {
             log::info!("toggle: restoring built-in display (supervisor {pid})");
@@ -124,6 +152,32 @@ fn toggle(app: &AppHandle) {
         log::debug!("toggle command returned after {:?}", started.elapsed());
         app.state::<Controller>().busy.store(false, Ordering::SeqCst);
         refresh(&app);
+    });
+}
+
+/// Always restore; repeated presses must never re-enable external-only mode.
+fn emergency_off(app: &AppHandle) {
+    let controller = app.state::<Controller>();
+    if controller.emergency_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    controller.stop_epoch.fetch_add(1, Ordering::SeqCst);
+    let app = app.clone();
+    thread::spawn(move || {
+        let controller = app.state::<Controller>();
+        let _command = controller.command.lock().unwrap();
+        set_desired_off(&app, false);
+        log::warn!("emergency off: stopping automation and restoring built-in display");
+        match display::restore() {
+            Ok(output) => log::info!(
+                "emergency restore: {} {} {}", output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => log::error!("could not run emergency restore: {error}"),
+        }
+        refresh(&app);
+        controller.emergency_pending.store(false, Ordering::SeqCst);
     });
 }
 
@@ -216,12 +270,16 @@ pub fn run() {
         .build();
 
     let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcuts([SHORTCUT])
+        .with_shortcuts([SHORTCUT, EMERGENCY_SHORTCUT])
         .expect("invalid shortcut")
         .with_handler(|app, shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 log::debug!("shortcut {shortcut:?}");
-                toggle(app);
+                if shortcut == &EMERGENCY_SHORTCUT.parse::<tauri_plugin_global_shortcut::Shortcut>().unwrap() {
+                    emergency_off(app);
+                } else {
+                    toggle(app);
+                }
             }
         })
         .build();
@@ -241,14 +299,18 @@ pub fn run() {
             log::info!("displayctl menu bar app starting; cli {}", display::binary().display());
 
             let (state, supervising) = current_state();
+            log::info!("emergency off shortcut registered: {EMERGENCY_SHORTCUT}");
+            let emergency = MenuItem::with_id(app, "emergency", "Emergency Off — Restore Built-in Display", true, Some(EMERGENCY_SHORTCUT))?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let tray = TrayIconBuilder::with_id("main")
                 .icon(Image::new_owned(icon::rgba(state), icon::SIZE as u32, icon::SIZE as u32))
                 .icon_as_template(true)
-                .menu(&Menu::with_items(app, &[&quit])?)
+                .menu(&Menu::with_items(app, &[&emergency, &quit])?)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
-                    if event.id() == "quit" {
+                    if event.id() == "emergency" {
+                        emergency_off(app);
+                    } else if event.id() == "quit" {
                         app.exit(0);
                     }
                 })
@@ -265,18 +327,27 @@ pub fn run() {
 
             if desired_off_path(handle).exists() && !supervising {
                 log::info!("restoring display-off from last session");
-                start_supervisor(handle);
+                let controller = app.state::<Controller>();
+                let _command = controller.command.lock().unwrap();
+                if !controller.emergency_pending.load(Ordering::SeqCst) {
+                    start_supervisor(handle);
+                }
             } else if supervising {
                 set_desired_off(handle, true);
             }
 
             // `pkill -USR1 displayctl-menubar` toggles too, for scripts and testing.
             let signals = handle.clone();
-            let mut usr1 = signal_hook::iterator::Signals::new([signal_hook::consts::SIGUSR1])?;
+            let mut usr1 = signal_hook::iterator::Signals::new([
+                signal_hook::consts::SIGUSR1, signal_hook::consts::SIGUSR2,
+            ])?;
             thread::spawn(move || {
-                for _ in usr1.forever() {
-                    log::debug!("SIGUSR1");
-                    toggle(&signals);
+                for signal in usr1.forever() {
+                    if signal == signal_hook::consts::SIGUSR2 {
+                        emergency_off(&signals);
+                    } else {
+                        toggle(&signals);
+                    }
                 }
             });
 

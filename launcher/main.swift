@@ -1,4 +1,4 @@
-// Login-item launcher for the dev-mode menu bar app. Being a real app gives the
+// Session-only launcher for the dev-mode menu bar app. Being a real app gives the
 // LaunchAgent a readable name and icon in System Settings, and lets macOS grant it
 // access to ~/Documents (a bare launchd shell script is denied). It stays alive as
 // the parent of scripts/dev.sh so that permission covers the whole dev toolchain.

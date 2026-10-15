@@ -10,6 +10,49 @@ import unittest
 
 
 class RetryErrorTests(unittest.TestCase):
+    def test_snapshot_reads_built_in_state_from_fresh_process(self):
+        self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" {
+    precondition(CommandLine.arguments.last == "123")
+    // Simulate the panel reopening while the parent still has an old connection.
+    FileHandle.standardOutput.write(try JSONEncoder().encode(
+        DisplaySnapshot(externalState: .ready, builtInOnline: true)
+    ))
+    exit(0)
+}
+extension DisplayController {
+    func exerciseFreshSnapshot() {
+        let snapshot = freshProcessDisplaySnapshot(displayID: 123)
+        precondition(snapshot.externalState == .ready)
+        precondition(snapshot.builtInOnline, "Use the child's built-in state")
+    }
+}
+DisplayController().exerciseFreshSnapshot()
+''')
+
+    def test_lid_opens_with_external_already_connected(self):
+        self.run_swift(r'''
+extension DisplayController {
+    func exerciseLidOpening() {
+        var requests: [Bool] = []
+        func step(online: Bool, time: Double) {
+            reconcileDisplayState(
+                externalState: .ready, builtInOnline: online,
+                now: Date(timeIntervalSinceReferenceDate: time)
+            ) { requests.append($0) }
+        }
+        step(online: false, time: 0) // Plug monitor in while lid is shut.
+        step(online: false, time: 2)
+        precondition(requests.isEmpty)
+        step(online: true, time: 3) // Open lid; external state hasn't changed.
+        precondition(requests == [false], "Opening lid must disable panel automatically")
+        step(online: false, time: 4)
+        precondition(requests == [false], "Do not repeatedly configure an offline panel")
+    }
+}
+DisplayController().exerciseLidOpening()
+''')
+
     def test_daily_brightness_schedule(self):
         self.run_swift(r'''
 private let single = BrightnessDisplay(id: 2, uuid: "external", useDefaultConnection: true)
