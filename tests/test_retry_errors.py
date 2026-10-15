@@ -16,7 +16,7 @@ if CommandLine.arguments.dropFirst().first == "probe-display-state" {
     precondition(CommandLine.arguments.last == "123")
     // Simulate the panel reopening while the parent still has an old connection.
     FileHandle.standardOutput.write(try JSONEncoder().encode(
-        DisplaySnapshot(externalState: .ready, builtInOnline: true)
+        DisplaySnapshot(externalState: .ready, builtInOnline: true, builtInActive: false, builtInUsable: false)
     ))
     exit(0)
 }
@@ -25,9 +25,63 @@ extension DisplayController {
         let snapshot = freshProcessDisplaySnapshot(displayID: 123)
         precondition(snapshot.externalState == .ready)
         precondition(snapshot.builtInOnline, "Use the child's built-in state")
+        precondition(!snapshot.builtInActive, "An online panel may still be unusable")
+        precondition(!snapshot.builtInUsable)
     }
 }
 DisplayController().exerciseFreshSnapshot()
+''')
+
+    def test_unplug_restores_online_but_inactive_panel(self):
+        self.run_swift(r'''
+extension DisplayController {
+    func exerciseInactivePanel() {
+        var requests: [Bool] = []
+        reconcileDisplayState(externalState: .ready, builtInOnline: false,
+                              builtInUsable: false) { requests.append($0) }
+        reconcileDisplayState(externalState: .absent, builtInOnline: true,
+                              builtInUsable: false) { requests.append($0) }
+        precondition(requests == [true], "Online-but-inactive must trigger unplug recovery")
+        reconcileDisplayState(externalState: .absent, builtInOnline: true,
+                              builtInUsable: false) { requests.append($0) }
+        precondition(requests == [true, true], "Retry until the panel is drawable")
+        reconcileDisplayState(externalState: .absent, builtInOnline: true,
+                              builtInUsable: true) { requests.append($0) }
+        precondition(requests == [true, true], "Stop restoring once active")
+        precondition(!displayStateMatches(online: true, observedOnline: true, usable: false))
+        precondition(displayStateMatches(online: true, observedOnline: true, usable: true))
+    }
+}
+DisplayController().exerciseInactivePanel()
+''')
+
+    def test_mirror_requires_an_awake_active_source(self):
+        self.run_swift(r'''
+precondition(usableDisplay(online: true, active: true, asleep: false, mirrorSourceActive: false))
+precondition(usableDisplay(online: true, active: false, asleep: false, mirrorSourceActive: true),
+             "A working hardware mirror can be inactive")
+precondition(!usableDisplay(online: true, active: false, asleep: false, mirrorSourceActive: false),
+             "An orphaned mirror is not restored")
+precondition(!usableDisplay(online: true, active: true, asleep: true, mirrorSourceActive: true),
+             "A sleeping panel is not verified restoration")
+precondition(!usableDisplay(online: false, active: false, asleep: false, mirrorSourceActive: true))
+''')
+
+    def test_stuck_display_helper_is_killed_with_timeout(self):
+        self.run_swift(r'''
+let child = Process()
+child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+child.arguments = ["30"]
+try child.run()
+let started = ProcessInfo.processInfo.systemUptime
+do {
+    try waitForDisplayProcess(child, timeout: 0.1)
+    preconditionFailure("A stuck display helper must time out")
+} catch {
+    precondition(String(describing: error).contains("timed out"))
+}
+precondition(!child.isRunning)
+precondition(ProcessInfo.processInfo.systemUptime - started < 2)
 ''')
 
     def test_lid_opens_with_external_already_connected(self):
@@ -37,7 +91,7 @@ extension DisplayController {
         var requests: [Bool] = []
         func step(online: Bool, time: Double) {
             reconcileDisplayState(
-                externalState: .ready, builtInOnline: online,
+                externalState: .ready, builtInOnline: online, builtInUsable: online,
                 now: Date(timeIntervalSinceReferenceDate: time)
             ) { requests.append($0) }
         }
@@ -173,7 +227,7 @@ extension DisplayController {
         var requests: [Bool] = []
         func step(_ state: ExternalDisplayState, online: Bool, time: Double) {
             reconcileDisplayState(
-                externalState: state, builtInOnline: online,
+                externalState: state, builtInOnline: online, builtInUsable: online,
                 now: Date(timeIntervalSinceReferenceDate: time)
             ) { requests.append($0) }
         }
@@ -218,7 +272,7 @@ extension DisplayController {
     func exerciseFailedRestoration() {
         var attempts = 0
         func fail(_ state: ExternalDisplayState) {
-            reconcileDisplayState(externalState: state, builtInOnline: false) { online in
+            reconcileDisplayState(externalState: state, builtInOnline: false, builtInUsable: false) { online in
                 precondition(online)
                 attempts += 1
                 throw ToolError.complete(CGError(rawValue: 1014)!)
@@ -229,7 +283,7 @@ extension DisplayController {
         fail(.absent)
         precondition(attempts == 2, "Sleep must skip configuration, unplug must retry")
         // Recovery observed without our intervention must re-enable warnings too.
-        reconcileDisplayState(externalState: .absent, builtInOnline: true) { _ in
+        reconcileDisplayState(externalState: .absent, builtInOnline: true, builtInUsable: true) { _ in
             preconditionFailure("Already restored")
         }
         fail(.absent)

@@ -83,9 +83,14 @@ in its own process group, so it keeps going across app restarts, and the app res
 it when manually relaunched if the display was off.
 
 **Emergency off: Control–Option–Shift–D**, anywhere while the menu bar app is running.
-This always stops the supervisor and restores the built-in display; pressing it
-again never turns the display off. It is also in the right-click menu. For terminal
-recovery, run `displayctl on` or `pkill -USR2 displayctl-menubar`.
+This stops the supervisor, wakes and enables the built-in display, and verifies
+that it is drawable or mirrors an active source. It repairs an orphaned mirror
+relationship during recovery. If targeted recovery fails with no active external
+monitor, it falls back to restoring the saved macOS display configuration.
+Pressing it again never turns the display off. If recovery fails, its record is
+kept so another press can retry. Display commands have time limits so a stuck
+command cannot block later recovery requests indefinitely. It is also in the
+right-click menu. For terminal recovery, run `displayctl on` or `pkill -USR2 displayctl-menubar`.
 Automation stays off until you explicitly toggle it back on.
 
 It runs in dev mode (debug build, verbose logs) only when manually started.

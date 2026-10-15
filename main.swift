@@ -1,6 +1,7 @@
 import CoreGraphics
 import Darwin
 import Foundation
+import IOKit.pwr_mgt
 
 private typealias ConfigureDisplayEnabled = @convention(c) (
     OpaquePointer?, CGDirectDisplayID, Int32
@@ -59,9 +60,9 @@ private enum ToolError: Error, CustomStringConvertible {
         case let .complete(error):
             return "Could not commit display configuration (CoreGraphics error \(error.rawValue))."
         case let .verification(id, expectedOnline):
-            return "Display \(id) did not become \(expectedOnline ? "online" : "offline")."
+            return "Display \(id) did not become \(expectedOnline ? "active and drawable" : "offline")."
         case .nothingToRestore:
-            return "No offline built-in display or recovery record was found."
+            return "No built-in display or recovery record was found."
         case let .watchdogAlreadyRunning(pid):
             return "An external-only watchdog is already running (PID \(pid)). Use `displayctl on` or stop that command with Control-C."
         case let .freshProcess(message):
@@ -188,9 +189,41 @@ private enum ExternalDisplayState: Int32, Codable {
 }
 
 // Read both sides of the topology through the same fresh WindowServer connection.
-private struct DisplaySnapshot: Codable {
+private struct DisplaySnapshot: Codable, Equatable {
     let externalState: ExternalDisplayState
     let builtInOnline: Bool
+    let builtInActive: Bool
+    let builtInUsable: Bool
+}
+
+// Online includes mirrored, sleeping, and otherwise unusable displays.
+private func displayStateMatches(online: Bool, observedOnline: Bool, usable: Bool) -> Bool {
+    online ? observedOnline && usable : !observedOnline
+}
+
+private func usableDisplay(online: Bool, active: Bool, asleep: Bool, mirrorSourceActive: Bool) -> Bool {
+    online && !asleep && (active || mirrorSourceActive)
+}
+
+private func displayIsUsable(_ id: CGDirectDisplayID) -> Bool {
+    let source = CGDisplayMirrorsDisplay(id)
+    let sourceActive = source != kCGNullDirectDisplay && CGDisplayIsOnline(source) != 0
+        && CGDisplayIsActive(source) != 0 && CGDisplayIsAsleep(source) == 0
+    return usableDisplay(online: CGDisplayIsOnline(id) != 0, active: CGDisplayIsActive(id) != 0,
+                         asleep: CGDisplayIsAsleep(id) != 0, mirrorSourceActive: sourceActive)
+}
+
+private func waitForDisplayProcess(_ process: Process, timeout: TimeInterval) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while process.isRunning {
+        if ProcessInfo.processInfo.systemUptime >= deadline {
+            kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+            throw ToolError.freshProcess("Display helper timed out after \(timeout) seconds.")
+        }
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    process.waitUntilExit()
 }
 
 private func displayReconfigurationCallback(
@@ -226,6 +259,7 @@ private final class DisplayController {
     private var externalMonitor: DispatchSourceTimer?
     private var displayCallbackRegistered = false
     private var observedExternalState: ExternalDisplayState?
+    private var observedSnapshot: DisplaySnapshot?
     private var externalReadySince = Date.distantPast
     private var reconcileErrors = ReconcileErrorLog()
     private let reconnectSettleSeconds: TimeInterval = 2
@@ -262,7 +296,7 @@ private final class DisplayController {
         guard !physicalExternals.isEmpty else { return .absent }
         // Online includes sleeping displays. Active additionally requires the
         // display to be awake and drawable; inactivity is not a disconnect.
-        return physicalExternals.contains { CGDisplayIsActive($0) != 0 }
+        return physicalExternals.contains { CGDisplayIsActive($0) != 0 && CGDisplayIsAsleep($0) == 0 }
             ? .ready : .inactive
     }
 
@@ -326,22 +360,14 @@ private final class DisplayController {
     func turnOn() throws {
         let record = try loadRecovery()
         let recordedID = record?.builtInDisplayID
-        let offlineBuiltIn = api.displayIDs().first {
-            CGDisplayIsBuiltin($0) != 0 && CGDisplayIsOnline($0) == 0
-        }
-        guard let id = recordedID ?? offlineBuiltIn else {
-            // Emergency restoration is idempotent when the panel is already on.
-            if api.displayIDs().contains(where: { CGDisplayIsBuiltin($0) != 0 && CGDisplayIsOnline($0) != 0 }) {
-                print("Built-in display is already on.")
-                return
-            }
-            throw ToolError.nothingToRestore
-        }
+        let builtIns = api.displayIDs().filter { CGDisplayIsBuiltin($0) != 0 }
+        guard builtIns.count <= 1 else { throw ToolError.multipleBuiltInDisplays(builtIns) }
+        guard let id = recordedID ?? builtIns.first else { throw ToolError.nothingToRestore }
 
         if let pid = record?.watchdogPID, pid != getpid(), processIsRunning(pid) {
             _ = kill(pid, SIGTERM)
             for _ in 0..<50 {
-                if CGDisplayIsOnline(id) != 0 && !processIsRunning(pid) { break }
+                if !processIsRunning(pid) { break }
                 Thread.sleep(forTimeInterval: 0.1)
             }
             // A blocked supervisor must not disable the display again after recovery.
@@ -351,9 +377,15 @@ private final class DisplayController {
                 }
             }
         }
-        if CGDisplayIsOnline(id) == 0 {
-            try configure(displayID: id, online: true)
-        }
+        // The supervisor may have cleared its own record while exiting. Keep a
+        // recovery target until this fresh process verifies a drawable panel.
+        try saveRecovery(displayID: id, watchdogPID: nil)
+        // This is an explicit user recovery request: wake the display as well as
+        // enabling it, even if CoreGraphics claims it is already online.
+        var assertion: IOPMAssertionID = 0
+        _ = IOPMAssertionDeclareUserActivity("displayctl emergency restore" as CFString,
+                                           kIOPMUserActiveLocal, &assertion)
+        try configure(displayID: id, online: true)
         try clearRecovery()
         print("Built-in display \(id) is on.")
     }
@@ -372,9 +404,14 @@ private final class DisplayController {
     private func reconcileDisplayState(displayID: CGDirectDisplayID) {
         guard !restoring else { return }
         let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
+        if observedSnapshot != snapshot {
+            printStatus("Display state: external=\(snapshot.externalState), built-in online=\(snapshot.builtInOnline), active=\(snapshot.builtInActive), usable=\(snapshot.builtInUsable).")
+            observedSnapshot = snapshot
+        }
         reconcileDisplayState(
             externalState: snapshot.externalState,
-            builtInOnline: snapshot.builtInOnline
+            builtInOnline: snapshot.builtInOnline,
+            builtInUsable: snapshot.builtInUsable
         ) { online in
             try configureInFreshProcess(displayID: displayID, online: online)
         }
@@ -383,6 +420,7 @@ private final class DisplayController {
     private func reconcileDisplayState(
         externalState: ExternalDisplayState,
         builtInOnline: Bool,
+        builtInUsable: Bool,
         now: Date = Date(),
         configure: (Bool) throws -> Void
     ) {
@@ -398,7 +436,8 @@ private final class DisplayController {
         // On wake, require a fresh settle interval before disabling the panel.
         guard externalState != .inactive else { return }
         let externalPresent = externalState == .ready
-        if builtInOnline == !externalPresent {
+        if displayStateMatches(online: !externalPresent, observedOnline: builtInOnline,
+                               usable: builtInUsable) {
             reconcileErrors.reset()
             return
         }
@@ -443,7 +482,7 @@ private final class DisplayController {
 
     private func freshProcessDisplaySnapshot(displayID: CGDirectDisplayID) -> DisplaySnapshot {
         // If probing fails, request restoration instead of trusting cached state.
-        let fallback = DisplaySnapshot(externalState: .absent, builtInOnline: false)
+        let fallback = DisplaySnapshot(externalState: .absent, builtInOnline: false, builtInActive: false, builtInUsable: false)
         guard let executable = currentExecutablePath() else { return fallback }
         let probe = Process()
         let output = Pipe()
@@ -453,8 +492,8 @@ private final class DisplayController {
         probe.standardError = FileHandle.nullDevice
         do {
             try probe.run()
+            try waitForDisplayProcess(probe, timeout: 2)
             let data = output.fileHandleForReading.readDataToEndOfFile()
-            probe.waitUntilExit()
             guard probe.terminationReason == .exit, probe.terminationStatus == 0 else { return fallback }
             return try JSONDecoder().decode(DisplaySnapshot.self, from: data)
         } catch {
@@ -463,9 +502,13 @@ private final class DisplayController {
     }
 
     func probeDisplaySnapshot(displayID: CGDirectDisplayID) throws {
+        let externalState = probeExternalDisplay()
+        let builtInActive = CGDisplayIsActive(displayID) != 0
         let snapshot = DisplaySnapshot(
-            externalState: probeExternalDisplay(),
-            builtInOnline: CGDisplayIsOnline(displayID) != 0
+            externalState: externalState,
+            builtInOnline: CGDisplayIsOnline(displayID) != 0,
+            builtInActive: builtInActive,
+            builtInUsable: displayIsUsable(displayID) && (builtInActive || externalState == .ready)
         )
         FileHandle.standardOutput.write(try JSONEncoder().encode(snapshot))
     }
@@ -488,8 +531,8 @@ private final class DisplayController {
         } catch {
             return try configure(displayID: displayID, online: online)
         }
+        try waitForDisplayProcess(child, timeout: 10)
         let output = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        child.waitUntilExit()
         guard child.terminationReason == .exit, child.terminationStatus == 0 else {
             var message = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.hasPrefix("displayctl: ") { message.removeFirst("displayctl: ".count) }
@@ -510,6 +553,24 @@ private final class DisplayController {
     }
 
     private func configure(displayID: CGDirectDisplayID, online: Bool) throws {
+        do {
+            try configureTargeted(displayID: displayID, online: online)
+        } catch {
+            // A failed begin, enable, unmirror, commit, or verification can all
+            // leave the last panel unusable. Reset saved preferences only when
+            // recovering without a ready physical external display.
+            guard online && probeExternalDisplay() != .ready else { throw error }
+            CGRestorePermanentDisplayConfiguration()
+            let deadline = ProcessInfo.processInfo.systemUptime + 4
+            repeat {
+                if CGDisplayIsOnline(displayID) != 0 && CGDisplayIsActive(displayID) != 0 { return }
+                Thread.sleep(forTimeInterval: 0.1)
+            } while ProcessInfo.processInfo.systemUptime < deadline
+            throw error
+        }
+    }
+
+    private func configureTargeted(displayID: CGDirectDisplayID, online: Bool) throws {
         guard let setEnabled = api.setEnabled else { throw ToolError.privateAPIUnavailable }
         var config: CGDisplayConfigRef?
         let begun = CGBeginDisplayConfiguration(&config)
@@ -521,13 +582,28 @@ private final class DisplayController {
             throw ToolError.configure(changed)
         }
 
+        // The disabled panel can remain a secondary mirror of the external
+        // display. Merely enabling it does not make it drawable after unplug.
+        let mirrorSource = CGDisplayMirrorsDisplay(displayID)
+        if online && mirrorSource != kCGNullDirectDisplay
+            && (probeExternalDisplay() != .ready || !displayIsUsable(mirrorSource)) {
+            let unmirrored = CGConfigureDisplayMirrorOfDisplay(config, displayID, kCGNullDirectDisplay)
+            guard unmirrored == .success else {
+                CGCancelDisplayConfiguration(config)
+                throw ToolError.configure(unmirrored)
+            }
+        }
+
         let completed = CGCompleteDisplayConfiguration(config, .forSession)
         // The private API can report a commit error even though WindowServer
         // applies the requested state. Treat the observed display state as the
         // source of truth so a successful transition is not retried and logged.
         let deadline = Date().addingTimeInterval(4)
         repeat {
-            if (CGDisplayIsOnline(displayID) != 0) == online { return }
+            if displayStateMatches(online: online,
+                                   observedOnline: CGDisplayIsOnline(displayID) != 0,
+                                   usable: displayIsUsable(displayID)
+                                    && (CGDisplayIsActive(displayID) != 0 || probeExternalDisplay() == .ready)) { return }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
 
@@ -540,14 +616,12 @@ private final class DisplayController {
         if let pid = record.watchdogPID, pid != getpid(), processIsRunning(pid) {
             throw ToolError.watchdogAlreadyRunning(pid)
         }
-        if CGDisplayIsOnline(record.builtInDisplayID) == 0 {
-            try configure(displayID: record.builtInDisplayID, online: true)
-            print("Recovered built-in display \(record.builtInDisplayID) from an interrupted run.")
-        }
+        try configure(displayID: record.builtInDisplayID, online: true)
+        print("Recovered built-in display \(record.builtInDisplayID) from an interrupted run.")
         try clearRecovery()
     }
 
-    private func saveRecovery(displayID: CGDirectDisplayID, watchdogPID: Int32) throws {
+    private func saveRecovery(displayID: CGDirectDisplayID, watchdogPID: Int32?) throws {
         let directory = recoveryURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(RecoveryRecord(builtInDisplayID: displayID, watchdogPID: watchdogPID))
@@ -591,9 +665,7 @@ private final class DisplayController {
                 )
                 displayCallbackRegistered = false
             }
-            if CGDisplayIsOnline(displayID) == 0 {
-                try configureInFreshProcess(displayID: displayID, online: true)
-            }
+            try configureInFreshProcess(displayID: displayID, online: true)
             try clearRecovery()
             print(message)
             fflush(stdout)

@@ -6,6 +6,8 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -93,13 +95,44 @@ pub fn start_supervisor() -> io::Result<Child> {
 }
 
 pub fn restore() -> io::Result<Output> {
-    Command::new(binary()).arg("on").stdin(Stdio::null()).output()
+    let mut command = Command::new(binary());
+    command.arg("on");
+    run_with_timeout(&mut command, Duration::from_secs(16))
+}
+
+fn run_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Output> {
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "display restoration timed out; recovery state retained, retry emergency off"));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn restore_timeout_releases_the_command_for_another_emergency_request() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let started = Instant::now();
+        let error = run_with_timeout(&mut command, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let output = run_with_timeout(&mut Command::new("/usr/bin/true"), Duration::from_secs(1)).unwrap();
+        assert!(output.status.success());
+    }
 
     /// Time per call of the checks the menu bar app polls:
     /// `cargo test --release poll_cost -- --ignored --nocapture`
