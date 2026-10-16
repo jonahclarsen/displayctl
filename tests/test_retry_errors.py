@@ -10,6 +10,75 @@ import unittest
 
 
 class RetryErrorTests(unittest.TestCase):
+    def test_restore_verification_rejects_false_success_from_online_active_flags(self):
+        self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" {
+    FileHandle.standardOutput.write(try JSONEncoder().encode(
+        DisplaySnapshot(externalState: .absent, builtInOnline: true,
+                        builtInActive: true, builtInUsable: false)
+    ))
+    exit(0)
+}
+extension DisplayController {
+    func exerciseFalseSuccess() throws {
+        try saveRecovery(displayID: 123, watchdogPID: nil)
+        do {
+            try verifyRestored(displayID: 123)
+            try finishRecovery()
+            preconditionFailure("Online/active alone must not finish recovery")
+        } catch {
+            let pending = try loadRecovery()
+            precondition(pending?.builtInDisplayID == 123)
+        }
+    }
+}
+let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+defer { try? FileManager.default.removeItem(at: directory) }
+try DisplayController(recoveryURL: directory.appendingPathComponent("recovery.json")).exerciseFalseSuccess()
+''')
+
+    def test_finished_recovery_retains_emergency_target_without_live_supervisor(self):
+        self.run_swift(r'''
+extension DisplayController {
+    func exerciseRecoveryLifetime() throws {
+        try saveRecovery(displayID: 123, watchdogPID: 456)
+        let running = try loadRecovery()
+        precondition(running?.watchdogPID == 456)
+        try finishRecovery()
+        let completed = try loadRecovery()
+        precondition(completed == nil, "Completed recovery must not resume automation")
+        let target = try loadRecoveryTarget()
+        precondition(target?.builtInDisplayID == 123, "A later emergency still needs the target")
+        precondition(target?.watchdogPID == nil)
+        try saveRecovery(displayID: 123, watchdogPID: nil)
+        let pending = try loadRecovery()
+        precondition(pending?.builtInDisplayID == 123, "Retries must re-arm the safety guard")
+    }
+}
+let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+defer { try? FileManager.default.removeItem(at: directory) }
+try DisplayController(recoveryURL: directory.appendingPathComponent("recovery.json")).exerciseRecoveryLifetime()
+''')
+
+    def test_restore_verification_waits_for_stable_fresh_snapshots(self):
+        self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" {
+    FileHandle.standardOutput.write(try JSONEncoder().encode(
+        DisplaySnapshot(externalState: .absent, builtInOnline: true,
+                        builtInActive: true, builtInUsable: true)
+    ))
+    exit(0)
+}
+extension DisplayController {
+    func exerciseStableRestoration() throws {
+        let start = ProcessInfo.processInfo.systemUptime
+        try verifyRestored(displayID: 123)
+        precondition(ProcessInfo.processInfo.systemUptime - start >= 0.5)
+    }
+}
+try DisplayController().exerciseStableRestoration()
+''')
+
     def test_snapshot_reads_built_in_state_from_fresh_process(self):
         self.run_swift(r'''
 if CommandLine.arguments.dropFirst().first == "probe-display-state" {

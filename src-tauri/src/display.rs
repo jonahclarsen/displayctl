@@ -70,6 +70,8 @@ struct Recovery {
     built_in_display_id: u32,
     #[serde(rename = "watchdogPID")]
     watchdog_pid: Option<i32>,
+    #[serde(default)]
+    restored: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -99,6 +101,9 @@ pub fn safety_snapshot() -> io::Result<Option<SafetySnapshot>> {
         Err(error) => return Err(error),
     };
     let recovery: Recovery = serde_json::from_slice(&data)?;
+    if recovery.restored {
+        return Ok(None);
+    }
     let mut command = Command::new(binary());
     command.args(["probe-display-state", &recovery.built_in_display_id.to_string()]);
     let output = run_with_timeout(&mut command, Duration::from_secs(2))?;
@@ -159,7 +164,8 @@ pub fn start_supervisor() -> io::Result<Child> {
 pub fn restore() -> io::Result<Output> {
     let mut command = Command::new(binary());
     command.arg("on");
-    run_with_timeout(&mut command, Duration::from_secs(16))
+    // Supervisor shutdown (13s) plus targeted/fallback verification (up to 10s).
+    run_with_timeout(&mut command, Duration::from_secs(26))
 }
 
 fn run_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Output> {

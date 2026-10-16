@@ -19,6 +19,10 @@
   awake, active source; online alone can mean a black panel after unplug. Keep
   recovery state until this check succeeds. A simulated lid-open test with the
   external monitor connected does not validate physical-unplug recovery.
+- Preserve the last recovery target after success: an unplug failure can hide
+  the built-in from enumeration. Commit enable before attempting mirror repair;
+  an unmirror error must never cancel the enable. Verify fallback restores with
+  fresh probes too, including built-in identity and awake state.
 - Keep the menu bar unplug watchdog independent of the Swift supervisor queue.
   Validate stalled-supervisor recovery as well as the supervisor’s own decisions.
 - After every change, commit it and push the commit to the current remote branch.

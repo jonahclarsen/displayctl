@@ -89,7 +89,12 @@ that it is drawable or mirrors an active source. It repairs an orphaned mirror
 relationship during recovery. If targeted recovery fails with no active external
 monitor, it falls back to restoring the saved macOS display configuration.
 Pressing it again never turns the display off. If recovery fails, its record is
-kept so another press can retry. Display commands have time limits so a stuck
+kept so another press can retry. The last recovery target is retained even after
+success, so an emergency retry can still find a panel missing from enumeration.
+Restore verification uses fresh processes and requires a stable, awake built-in
+panel; cached online/active flags alone do not count. Enabling is committed before
+attempting mirror repair, so a mirror error cannot cancel the enable.
+Display commands have time limits so a stuck
 command cannot block later recovery requests indefinitely. It is also in the
 right-click menu. For terminal recovery, run `displayctl on` or `pkill -USR2 displayctl-menubar`.
 Automation stays off until you explicitly toggle it back on.
