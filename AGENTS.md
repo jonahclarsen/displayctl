@@ -28,8 +28,9 @@
 - Unplug recovery was confirmed working by the user after `6d94406`. Keep visual
   transition optimizations confined to disabling the panel; preserve the verified
   restore path. Adding `CGConfigureDisplayFadeEffect` to a soft-disconnect
-  transaction caused commit error 1006 on this Mac; use a separate fade
-  reservation instead. Software state cannot prove a monitor avoided a physical
-  signal reset; confirm that part visually with the user.
+  transaction caused commit error 1006 on this Mac. A separate fade reservation
+  also failed to prevent ASUS blanking according to the user's physical test;
+  both experiments were reverted. Software state cannot prove a monitor avoided
+  a physical signal reset; confirm that part visually with the user.
 - After every change, commit it and push the commit to the current remote branch.
 - The repository is public: never commit signing identities, personal paths, or logs.
