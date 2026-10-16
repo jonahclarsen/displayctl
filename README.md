@@ -9,6 +9,11 @@
 
 Virtual displays and AirPlay displays do not count as physical external displays.
 
+Disabling the laptop panel requests zero-duration Quartz fades so the external
+desktop can stay visible during the change. This suppresses the macOS fade effect;
+it cannot prevent a monitor from blanking if the display link itself renegotiates.
+Restoration uses the existing recovery path.
+
 ## Requirements
 
 - macOS

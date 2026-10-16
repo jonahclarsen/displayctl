@@ -624,6 +624,15 @@ private final class DisplayController {
             throw ToolError.configure(changed)
         }
 
+        if !online {
+            // Suppress Quartz's transaction-wide fade when only disconnecting
+            // the laptop panel. Keep the verified restoration path unchanged.
+            // Cosmetic failure must not cancel the actual display operation.
+            let fade = CGConfigureDisplayFadeEffect(config, 0, 0, 0, 0, 0)
+            if fade != .success {
+                printStatus("Could not suppress display fade: \(fade.rawValue).", toError: true)
+            }
+        }
         let completed = CGCompleteDisplayConfiguration(config, .forSession)
 
         // Commit the enable FIRST. An invalid/orphaned mirror can reject an
