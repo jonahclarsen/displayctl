@@ -144,10 +144,15 @@ private final class PrivateDisplayAPI {
     }
 
     func onlineDisplayIDs() -> [CGDirectDisplayID] {
+        onlineDisplayIDsIfAvailable() ?? []
+    }
+
+    func onlineDisplayIDsIfAvailable() -> [CGDirectDisplayID]? {
         var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return nil }
+        guard count > 0 else { return [] }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return nil }
         return Array(ids.prefix(Int(count)))
     }
 
@@ -183,12 +188,15 @@ private struct RecoveryRecord: Codable {
     // Retain the target after restoration: disconnected panels can disappear
     // from enumeration, and a later emergency request must still find them.
     var restored: Bool? = nil
+    // A failed probe must never become a restore/re-disable loop after restart.
+    var automationSuspended: Bool? = nil
 }
 
 private enum ExternalDisplayState: Int32, Codable {
     case ready = 0
     case absent = 1
     case inactive = 2
+    case unknown = 3
 }
 
 private func externalDisplayState(_ displays: [(active: Bool, asleep: Bool)]) -> ExternalDisplayState {
@@ -304,7 +312,8 @@ private final class DisplayController {
     }
 
     func probeExternalDisplay() -> ExternalDisplayState {
-        let physicalExternals = api.onlineDisplayIDs().filter {
+        guard let onlineIDs = api.onlineDisplayIDsIfAvailable() else { return .unknown }
+        let physicalExternals = onlineIDs.filter {
             api.physicalExternalName(displayID: $0) != nil
         }
         return externalDisplayState(physicalExternals.map {
@@ -323,7 +332,8 @@ private final class DisplayController {
         let builtInID = builtIns[0]
         let externalState = probeExternalDisplay()
         let builtInAlreadyOffline = CGDisplayIsOnline(builtInID) == 0
-        try saveRecovery(displayID: builtInID, watchdogPID: getpid())
+        // Starting `off` is an explicit request to resume automation.
+        try saveRecovery(displayID: builtInID, watchdogPID: getpid(), automationSuspended: false)
         if externalState == .ready && !builtInAlreadyOffline {
             do {
                 try configure(displayID: builtInID, online: false)
@@ -426,6 +436,15 @@ private final class DisplayController {
             lastHeartbeat = uptime
         }
         let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
+        if snapshot.externalState == .unknown {
+            do {
+                try saveRecovery(displayID: displayID, watchdogPID: getpid(), automationSuspended: true)
+            } catch {
+                printStatus("Could not persist automation suspension: \(error)", toError: true)
+            }
+            printStatus("Display status unavailable; suspending automatic switching and restoring the laptop. Enable manually to resume.", toError: true)
+            restoreAndExit(displayID: displayID, message: "Built-in display restored; automatic switching suspended.", exitStatus: 75)
+        }
         if observedSnapshot != snapshot {
             printStatus("Display state: external=\(snapshot.externalState), built-in online=\(snapshot.builtInOnline), active=\(snapshot.builtInActive), usable=\(snapshot.builtInUsable).")
             observedSnapshot = snapshot
@@ -503,8 +522,8 @@ private final class DisplayController {
     }
 
     private func freshProcessDisplaySnapshot(displayID: CGDirectDisplayID) -> DisplaySnapshot {
-        // If probing fails, request restoration instead of trusting cached state.
-        let fallback = DisplaySnapshot(externalState: .absent, builtInOnline: false, builtInActive: false, builtInUsable: false)
+        // Unknown is not an unplug: recover once, then suspend automatic switching.
+        let fallback = DisplaySnapshot(externalState: .unknown, builtInOnline: false, builtInActive: false, builtInUsable: false)
         guard let executable = currentExecutablePath() else { return fallback }
         let probe = Process()
         let output = Pipe()
@@ -672,10 +691,12 @@ private final class DisplayController {
         try finishRecovery()
     }
 
-    private func saveRecovery(displayID: CGDirectDisplayID, watchdogPID: Int32?) throws {
+    private func saveRecovery(displayID: CGDirectDisplayID, watchdogPID: Int32?, automationSuspended: Bool? = nil) throws {
+        let suspended = try automationSuspended ?? loadRecoveryTarget()?.automationSuspended
         let directory = recoveryURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(RecoveryRecord(builtInDisplayID: displayID, watchdogPID: watchdogPID))
+        let data = try JSONEncoder().encode(RecoveryRecord(builtInDisplayID: displayID, watchdogPID: watchdogPID,
+                                                         automationSuspended: suspended))
         try data.write(to: recoveryURL, options: .atomic)
     }
 
@@ -692,7 +713,8 @@ private final class DisplayController {
     private func finishRecovery() throws {
         guard let record = try loadRecoveryTarget() else { return }
         let restored = RecoveryRecord(builtInDisplayID: record.builtInDisplayID,
-                                      watchdogPID: nil, restored: true)
+                                      watchdogPID: nil, restored: true,
+                                      automationSuspended: record.automationSuspended)
         try JSONEncoder().encode(restored).write(to: recoveryURL, options: .atomic)
     }
 
@@ -712,7 +734,7 @@ private final class DisplayController {
         signalSources.append(source)
     }
 
-    private func restoreAndExit(displayID: CGDirectDisplayID, message: String) -> Never {
+    private func restoreAndExit(displayID: CGDirectDisplayID, message: String, exitStatus: Int32 = EXIT_SUCCESS) -> Never {
         guard !restoring else { exit(EXIT_SUCCESS) }
         restoring = true
         do {
@@ -727,11 +749,11 @@ private final class DisplayController {
             try finishRecovery()
             print(message)
             fflush(stdout)
-            exit(EXIT_SUCCESS)
+            exit(exitStatus)
         } catch {
             fputs("displayctl: restore failed: \(error)\n", stderr)
             fflush(stderr)
-            exit(EXIT_FAILURE)
+            exit(exitStatus == EXIT_SUCCESS ? EXIT_FAILURE : exitStatus)
         }
     }
 }

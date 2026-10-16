@@ -72,6 +72,15 @@ struct Recovery {
     watchdog_pid: Option<i32>,
     #[serde(default)]
     restored: bool,
+    #[serde(default, rename = "automationSuspended")]
+    automation_suspended: bool,
+}
+
+pub fn automation_suspended() -> bool {
+    fs::read(home().join(".local/state/displayctl/recovery.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<Recovery>(&data).ok())
+        .is_some_and(|record| record.automation_suspended)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -83,12 +92,17 @@ pub struct SafetySnapshot {
 
 impl SafetySnapshot {
     pub fn unavailable() -> Self {
-        Self { external_state: 1, built_in_usable: false }
+        Self { external_state: 3, built_in_usable: false }
+    }
+
+    pub fn can_resume_after_recovery(self) -> bool {
+        self.external_state == 1
     }
 
     pub fn needs_recovery(self) -> bool {
-        // 0 = ready; 1 = absent/unusable; 2 = connected but asleep.
-        self.external_state == 1 && !self.built_in_usable
+        // Unknown still permits rescue, but must not restart automatic disabling.
+        // 0 = ready; 1 = absent/unusable; 2 = asleep; 3 = probe unavailable.
+        matches!(self.external_state, 1 | 3) && !self.built_in_usable
     }
 }
 
@@ -178,7 +192,7 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Outp
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "display restoration timed out; recovery state retained, retry emergency off"));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, format!("display helper timed out after {timeout:?}")));
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -192,7 +206,7 @@ mod tests {
     #[test]
     fn independent_watchdog_recovers_when_supervisor_never_reports_unplug() {
         let now = Instant::now();
-        let absent = SafetySnapshot::unavailable();
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
         let mut guard = UnplugWatchdog::default();
         assert!(!guard.poll(Some(absent), now));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(2)));
@@ -203,6 +217,33 @@ mod tests {
         assert!(!guard.poll(Some(restored), now + Duration::from_secs(13)));
         assert!(!guard.poll(Some(absent), now + Duration::from_secs(14)));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(16)));
+    }
+
+    #[test]
+    fn unknown_topology_allows_rescue_but_never_automatic_restart() {
+        let unknown = SafetySnapshot::unavailable();
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
+        assert_ne!(unknown, absent);
+        assert!(unknown.needs_recovery());
+        assert!(!unknown.can_resume_after_recovery());
+        assert!(absent.can_resume_after_recovery());
+        let now = Instant::now();
+        let mut watchdog = UnplugWatchdog::default();
+        assert!(!watchdog.poll(Some(unknown), now));
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(2)));
+        // Failed restoration still retries, independently of the Swift worker.
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(12)));
+        assert!(!watchdog.poll(None, now + Duration::from_secs(13)));
+    }
+
+    #[test]
+    fn recovery_suspension_is_backward_compatible() {
+        let old: Recovery = serde_json::from_str(r#"{"builtInDisplayID":1,"restored":true}"#).unwrap();
+        assert!(!old.automation_suspended);
+        let suspended: Recovery = serde_json::from_str(
+            r#"{"builtInDisplayID":1,"restored":true,"automationSuspended":true}"#,
+        ).unwrap();
+        assert!(suspended.automation_suspended);
     }
 
     #[test]

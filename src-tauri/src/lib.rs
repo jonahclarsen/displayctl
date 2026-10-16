@@ -23,8 +23,8 @@ use tauri_plugin_global_shortcut::ShortcutState;
 const SHORTCUT: &str = "ctrl+shift+d";
 const EMERGENCY_SHORTCUT: &str = "ctrl+alt+shift+d";
 const EMERGENCY_ALIAS: &str = "alt+shift+d";
-const POLL: Duration = Duration::from_millis(250);
-const REFRESH_RATE_POLL: Duration = Duration::from_secs(1);
+const POLL: Duration = Duration::from_secs(1);
+const REFRESH_RATE_POLL: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,7 +106,17 @@ fn start_supervisor(app: &AppHandle) {
             let app = app.clone();
             thread::spawn(move || {
                 match child.wait() {
-                    Ok(status) => log::info!("supervisor {pid} exited: {status}"),
+                    Ok(status) => {
+                        log::info!("supervisor {pid} exited: {status}");
+                        if status.code() == Some(75) {
+                            let controller = app.state::<Controller>();
+                            let _command = controller.command.lock().unwrap();
+                            // Do not cancel a newer, explicit request to start.
+                            if display::supervisor_pid().is_none() {
+                                set_desired_off(&app, false);
+                            }
+                        }
+                    }
                     Err(error) => log::error!("waiting for supervisor {pid}: {error}"),
                 }
                 refresh(&app);
@@ -203,12 +213,18 @@ fn recover_unplug(app: &AppHandle) {
     if !snapshot.is_some_and(display::SafetySnapshot::needs_recovery) {
         return;
     }
-    let resume = desired_off_path(app).exists();
-    log::warn!("independent unplug watchdog: no usable screen; restoring without waiting for the supervisor's event queue");
+    let resume = desired_off_path(app).exists()
+        && snapshot.is_some_and(display::SafetySnapshot::can_resume_after_recovery)
+        && !display::automation_suspended();
+    if !resume {
+        set_desired_off(app, false);
+    }
+    log::warn!("independent unplug watchdog: restoring; resume automatic switching after confirmed unplug: {resume}");
     match display::restore() {
         Ok(output) if output.status.success() => {
             log::info!("unplug recovery: {}", String::from_utf8_lossy(&output.stdout).trim());
-            if resume && !controller.emergency_pending.load(Ordering::SeqCst)
+            if resume && !display::automation_suspended()
+                && !controller.emergency_pending.load(Ordering::SeqCst)
                 && controller.stop_epoch.load(Ordering::SeqCst) == stop_epoch
             {
                 // Continue supervising reconnects after replacing a stalled worker.
@@ -365,7 +381,10 @@ pub fn run() {
             log::info!("state: {state:?}");
             refresh_rate(handle);
 
-            if desired_off_path(handle).exists() && !supervising {
+            if display::automation_suspended() {
+                set_desired_off(handle, false);
+                log::warn!("automatic switching remains suspended after an unavailable display probe");
+            } else if desired_off_path(handle).exists() && !supervising {
                 log::info!("restoring display-off from last session");
                 let controller = app.state::<Controller>();
                 let _command = controller.command.lock().unwrap();
@@ -411,6 +430,14 @@ pub fn run() {
                 log::info!("independent unplug watchdog started");
                 loop {
                     thread::sleep(Duration::from_secs(1));
+                    if display::automation_suspended() && desired_off_path(&safety).exists() {
+                        let controller = safety.state::<Controller>();
+                        let _command = controller.command.lock().unwrap();
+                        // Recheck under the same lock as an explicit toggle.
+                        if display::automation_suspended() {
+                            set_desired_off(&safety, false);
+                        }
+                    }
                     let snapshot = match display::safety_snapshot() {
                         Ok(snapshot) => snapshot,
                         Err(error) => {

@@ -44,6 +44,16 @@ Permanent scope was not tested because reboot must remain a recovery path.
 
 ## Remaining lead and limits
 
+Later investigation found a separate, confirmed idle-transition bug: probe
+timeouts were encoded as an absent external display in both watchdogs. Under
+load, the supervisor restored the laptop, then disabled it again after a
+successful probe; the independent watchdog could also restart the worker after
+uncertain recovery. Logs showed these repeated transitions without a physical
+unplug. Unknown topology now has its own state and suspends automatic switching
+after recovery until explicitly enabled again. This fixes that feedback loop;
+it does not establish a seamless intentional full-disconnect transition or
+explain blackouts observed with automation fully stopped.
+
 System load was unusually high (one observed one-minute load average exceeded
 240), and even short subprocesses sometimes took seconds. A bounded local
 WindowServer log scan found repeated 250 ms acknowledgment timeouts for

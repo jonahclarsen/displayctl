@@ -104,8 +104,11 @@ state every second, without relying on the supervisor's event queue. If there is
 no usable screen for two seconds, it restores the built-in panel and replaces the
 supervisor so reconnect detection continues. A genuinely sleeping monitor is left
 alone; an inactive but awake connector does not count as a usable monitor.
-Failed safety probes request recovery rather than assuming an external display
-is still present. Failed recovery is retried at ten-second intervals.
+Failed safety probes are treated as unknown, not as a confirmed unplug. They
+request recovery and suspend automatic switching until explicitly enabled again;
+otherwise a slow probe could repeatedly restore and re-disable the laptop panel.
+The suspension survives an app relaunch. Confirmed unplug/reconnect detection
+remains automatic. Failed recovery is retried at ten-second intervals.
 
 It runs in dev mode (debug build, verbose logs) only when manually started.
 It does **not** launch at login or after a reboot, so restarting the Mac is a

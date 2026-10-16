@@ -10,6 +10,51 @@ import unittest
 
 
 class RetryErrorTests(unittest.TestCase):
+    def test_probe_timeout_restores_then_exits_instead_of_rearming(self):
+        result = self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" {
+    Thread.sleep(forTimeInterval: 30)
+    exit(0)
+}
+if CommandLine.arguments.dropFirst().first == "set-built-in" {
+    precondition(CommandLine.arguments.last == "on", "Timeout must never disable a display")
+    exit(0) // Fake the restore child; no display API is called by this harness.
+}
+extension DisplayController {
+    func exerciseTimedOutProbe() throws {
+        try saveRecovery(displayID: 123, watchdogPID: getpid())
+        reconcileDisplayState(displayID: 123)
+        preconditionFailure("Unavailable topology must terminate automatic switching")
+    }
+}
+let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+    .appendingPathComponent("recovery.json")
+try DisplayController(recoveryURL: record).exerciseTimedOutProbe()
+''', expected_status=75)
+        self.assertIn("automatic switching suspended", result.stdout)
+
+    def test_suspension_survives_restore_and_only_explicit_start_clears_it(self):
+        self.run_swift(r'''
+extension DisplayController {
+    func exerciseSuspension() throws {
+        try saveRecovery(displayID: 123, watchdogPID: 456, automationSuspended: true)
+        try saveRecovery(displayID: 123, watchdogPID: nil) // Emergency restore retry.
+        try finishRecovery()
+        let suspended = try loadRecoveryTarget()
+        precondition(suspended?.automationSuspended == true)
+        precondition(suspended?.restored == true)
+        precondition(suspended?.builtInDisplayID == 123)
+        try saveRecovery(displayID: 123, watchdogPID: 456, automationSuspended: false)
+        let resumed = try loadRecoveryTarget()
+        precondition(resumed?.automationSuspended == false)
+        precondition(resumed?.restored != true)
+    }
+}
+let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+    .appendingPathComponent("recovery.json")
+try DisplayController(recoveryURL: record).exerciseSuspension()
+''')
+
     def test_restore_verification_rejects_false_success_from_online_active_flags(self):
         self.run_swift(r'''
 if CommandLine.arguments.dropFirst().first == "probe-display-state" {
@@ -251,7 +296,7 @@ for second in 0..<5 { precondition(tick(Double(second)).isEmpty) }
 precondition(tick(5) == ["A"])
 ''')
 
-    def run_swift(self, harness):
+    def run_swift(self, harness, expected_status=0):
         source = (Path(__file__).resolve().parents[1] / "main.swift").read_text()
         definitions, marker, _ = source.partition("// MARK: Command-line entry point")
         self.assertTrue(marker, "Could not locate the CLI entry point")
@@ -262,9 +307,15 @@ precondition(tick(5) == ["A"])
             binary = Path(directory) / "test-displayctl"
             main.write_text(definitions + harness)
             subprocess.run(["swiftc", str(main), "-o", str(binary)], check=True)
-            return subprocess.run(
-                [str(binary)], capture_output=True, text=True, check=True
-            )
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
+            if expected_status == 75:
+                import json
+                record = json.loads((Path(directory) / "recovery.json").read_text())
+                self.assertTrue(record["automationSuspended"])
+                self.assertTrue(record["restored"])
+                self.assertEqual(record["builtInDisplayID"], 123)
+            return result
 
     def test_warnings_stay_suppressed_until_recovery(self):
         result = self.run_swift(r'''

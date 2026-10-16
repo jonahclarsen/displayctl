@@ -25,6 +25,10 @@
   fresh probes too, including built-in identity and awake state.
 - Keep the menu bar unplug watchdog independent of the Swift supervisor queue.
   Validate stalled-supervisor recovery as well as the supervisor’s own decisions.
+- Probe failure/timeout is unknown topology, not confirmed unplug. Restore safely
+  and suspend automatic disabling until explicitly enabled again; preserve that
+  suspension across restore and relaunch. Never resume an off worker just because
+  a later probe succeeds after unknown-state recovery.
 - Unplug recovery was confirmed working by the user after `6d94406`. Keep visual
   transition optimizations confined to disabling the panel; preserve the verified
   restore path. Adding `CGConfigureDisplayFadeEffect` to a soft-disconnect
