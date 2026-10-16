@@ -215,6 +215,23 @@ private struct DisplaySnapshot: Codable, Equatable {
     let builtInUsable: Bool
 }
 
+// Require repeated misses over a bounded interval, not one slow query.
+private struct UnavailableProbeGuard {
+    private var since: TimeInterval?
+    private var failures = 0
+
+    mutating func shouldSuspend(_ state: ExternalDisplayState, uptime: TimeInterval) -> Bool {
+        guard state == .unknown else {
+            since = nil
+            failures = 0
+            return false
+        }
+        if since == nil { since = uptime }
+        failures += 1
+        return failures >= 3 && uptime - since! >= 6
+    }
+}
+
 // Online includes mirrored, sleeping, and otherwise unusable displays.
 private func displayStateMatches(online: Bool, observedOnline: Bool, usable: Bool) -> Bool {
     online ? observedOnline && usable : !observedOnline
@@ -279,6 +296,7 @@ private final class DisplayController {
     private var displayCallbackRegistered = false
     private var observedExternalState: ExternalDisplayState?
     private var observedSnapshot: DisplaySnapshot?
+    private var unavailableProbes = UnavailableProbeGuard()
     private var lastHeartbeat: TimeInterval = 0
     private var externalReadySince = Date.distantPast
     private var reconcileErrors = ReconcileErrorLog()
@@ -436,7 +454,12 @@ private final class DisplayController {
             lastHeartbeat = uptime
         }
         let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
+        let suspend = unavailableProbes.shouldSuspend(
+            snapshot.externalState, uptime: ProcessInfo.processInfo.systemUptime
+        )
         if snapshot.externalState == .unknown {
+            // Retry isolated misses without configuring either display.
+            guard suspend else { return }
             do {
                 try saveRecovery(displayID: displayID, watchdogPID: getpid(), automationSuspended: true)
             } catch {

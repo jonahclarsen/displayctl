@@ -23,8 +23,11 @@ if CommandLine.arguments.dropFirst().first == "set-built-in" {
 extension DisplayController {
     func exerciseTimedOutProbe() throws {
         try saveRecovery(displayID: 123, watchdogPID: getpid())
-        reconcileDisplayState(displayID: 123)
-        preconditionFailure("Unavailable topology must terminate automatic switching")
+        for _ in 0..<5 {
+            reconcileDisplayState(displayID: 123)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        preconditionFailure("Sustained unavailable topology must terminate automatic switching")
     }
 }
 let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
@@ -32,6 +35,36 @@ let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComp
 try DisplayController(recoveryURL: record).exerciseTimedOutProbe()
 ''', expected_status=75)
         self.assertIn("automatic switching suspended", result.stdout)
+
+    def test_isolated_unknown_probe_does_not_suspend_or_change_displays(self):
+        self.run_swift(r'''
+private var guardState = UnavailableProbeGuard()
+precondition(!guardState.shouldSuspend(.unknown, uptime: 0))
+precondition(!guardState.shouldSuspend(.ready, uptime: 1))
+precondition(!guardState.shouldSuspend(.unknown, uptime: 10))
+precondition(!guardState.shouldSuspend(.unknown, uptime: 20))
+precondition(guardState.shouldSuspend(.unknown, uptime: 21))
+precondition(!guardState.shouldSuspend(.inactive, uptime: 22))
+precondition(!guardState.shouldSuspend(.unknown, uptime: 30))
+precondition(!guardState.shouldSuspend(.absent, uptime: 31))
+
+if CommandLine.arguments.dropFirst().first == "probe-display-state" { exit(1) }
+if CommandLine.arguments.dropFirst().first == "set-built-in" {
+    preconditionFailure("An isolated failed probe must not reconfigure anything")
+}
+extension DisplayController {
+    func exerciseIsolatedMiss() throws {
+        try saveRecovery(displayID: 123, watchdogPID: getpid(), automationSuspended: false)
+        reconcileDisplayState(displayID: 123)
+        let record = try loadRecoveryTarget()
+        precondition(record?.automationSuspended == false)
+        precondition(record?.restored != true)
+    }
+}
+let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+    .appendingPathComponent("recovery.json")
+try DisplayController(recoveryURL: record).exerciseIsolatedMiss()
+''')
 
     def test_suspension_survives_restore_and_only_explicit_start_clears_it(self):
         self.run_swift(r'''

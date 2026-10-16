@@ -131,6 +131,8 @@ pub fn safety_snapshot() -> io::Result<Option<SafetySnapshot>> {
 pub struct UnplugWatchdog {
     missing_since: Option<Instant>,
     last_attempt: Option<Instant>,
+    unknown_since: Option<Instant>,
+    unknown_samples: u32,
 }
 
 impl UnplugWatchdog {
@@ -138,9 +140,22 @@ impl UnplugWatchdog {
         if !snapshot.is_some_and(SafetySnapshot::needs_recovery) {
             self.missing_since = None;
             self.last_attempt = None;
+            self.unknown_since = None;
+            self.unknown_samples = 0;
             return false;
         }
         let since = *self.missing_since.get_or_insert(now);
+        if snapshot.is_some_and(|state| state.external_state == 3) {
+            let unknown_since = *self.unknown_since.get_or_insert(now);
+            self.unknown_samples = self.unknown_samples.saturating_add(1);
+            // Match the Swift supervisor: isolated slow reads do not restore.
+            if self.unknown_samples < 3 || now.duration_since(unknown_since) < Duration::from_secs(6) {
+                return false;
+            }
+        } else {
+            self.unknown_since = None;
+            self.unknown_samples = 0;
+        }
         if now.duration_since(since) < Duration::from_secs(2)
             || self.last_attempt.is_some_and(|at| now.duration_since(at) < Duration::from_secs(10))
         {
@@ -230,10 +245,28 @@ mod tests {
         let now = Instant::now();
         let mut watchdog = UnplugWatchdog::default();
         assert!(!watchdog.poll(Some(unknown), now));
-        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(2)));
+        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(2)));
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(6)));
         // Failed restoration still retries, independently of the Swift worker.
-        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(12)));
-        assert!(!watchdog.poll(None, now + Duration::from_secs(13)));
+        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(12)));
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(16)));
+        assert!(!watchdog.poll(None, now + Duration::from_secs(17)));
+    }
+
+    #[test]
+    fn isolated_slow_probes_do_not_restore_or_delay_confirmed_unplug() {
+        let now = Instant::now();
+        let mut guard = UnplugWatchdog::default();
+        let unknown = SafetySnapshot::unavailable();
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
+        assert!(!guard.poll(Some(unknown), now));
+        assert!(!guard.poll(Some(ready), now + Duration::from_secs(1)));
+        assert!(!guard.poll(Some(unknown), now + Duration::from_secs(10)));
+        assert!(!guard.poll(Some(unknown), now + Duration::from_secs(20)));
+        assert!(!guard.poll(Some(ready), now + Duration::from_secs(21)));
+        assert!(!guard.poll(Some(absent), now + Duration::from_secs(22)));
+        assert!(guard.poll(Some(absent), now + Duration::from_secs(24)));
     }
 
     #[test]
