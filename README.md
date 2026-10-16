@@ -82,7 +82,8 @@ Click the icon for a one-button popover, press Control-Shift-D anywhere, or run
 in its own process group, so it keeps going across app restarts, and the app resumes
 it when manually relaunched if the display was off.
 
-**Emergency off: Control–Option–Shift–D**, anywhere while the menu bar app is running.
+**Emergency off: Control–Option–Shift–D or Option–Shift–D**, anywhere while the
+menu bar app is running. Both shortcuts always restore; neither toggles.
 This stops the supervisor, wakes and enables the built-in display, and verifies
 that it is drawable or mirrors an active source. It repairs an orphaned mirror
 relationship during recovery. If targeted recovery fails with no active external
@@ -92,6 +93,14 @@ kept so another press can retry. Display commands have time limits so a stuck
 command cannot block later recovery requests indefinitely. It is also in the
 right-click menu. For terminal recovery, run `displayctl on` or `pkill -USR2 displayctl-menubar`.
 Automation stays off until you explicitly toggle it back on.
+
+The menu bar app also runs an independent unplug watchdog. It reads fresh display
+state every second, without relying on the supervisor's event queue. If there is
+no usable screen for two seconds, it restores the built-in panel and replaces the
+supervisor so reconnect detection continues. A genuinely sleeping monitor is left
+alone; an inactive but awake connector does not count as a usable monitor.
+Failed safety probes request recovery rather than assuming an external display
+is still present. Failed recovery is retried at ten-second intervals.
 
 It runs in dev mode (debug build, verbose logs) only when manually started.
 It does **not** launch at login or after a reboot, so restarting the Mac is a

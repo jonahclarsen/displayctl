@@ -188,6 +188,14 @@ private enum ExternalDisplayState: Int32, Codable {
     case inactive = 2
 }
 
+private func externalDisplayState(_ displays: [(active: Bool, asleep: Bool)]) -> ExternalDisplayState {
+    guard !displays.isEmpty else { return .absent }
+    if displays.contains(where: { $0.active && !$0.asleep }) { return .ready }
+    // An inactive, awake display is not a working monitor. In particular, a
+    // disappearing connector must not be mistaken for a sleeping monitor.
+    return displays.allSatisfy { $0.asleep } ? .inactive : .absent
+}
+
 // Read both sides of the topology through the same fresh WindowServer connection.
 private struct DisplaySnapshot: Codable, Equatable {
     let externalState: ExternalDisplayState
@@ -260,6 +268,7 @@ private final class DisplayController {
     private var displayCallbackRegistered = false
     private var observedExternalState: ExternalDisplayState?
     private var observedSnapshot: DisplaySnapshot?
+    private var lastHeartbeat: TimeInterval = 0
     private var externalReadySince = Date.distantPast
     private var reconcileErrors = ReconcileErrorLog()
     private let reconnectSettleSeconds: TimeInterval = 2
@@ -293,11 +302,9 @@ private final class DisplayController {
         let physicalExternals = api.onlineDisplayIDs().filter {
             api.physicalExternalName(displayID: $0) != nil
         }
-        guard !physicalExternals.isEmpty else { return .absent }
-        // Online includes sleeping displays. Active additionally requires the
-        // display to be awake and drawable; inactivity is not a disconnect.
-        return physicalExternals.contains { CGDisplayIsActive($0) != 0 && CGDisplayIsAsleep($0) == 0 }
-            ? .ready : .inactive
+        return externalDisplayState(physicalExternals.map {
+            (active: CGDisplayIsActive($0) != 0, asleep: CGDisplayIsAsleep($0) != 0)
+        })
     }
 
     func turnOff(restoreAfter: TimeInterval?) throws -> Never {
@@ -403,6 +410,11 @@ private final class DisplayController {
 
     private func reconcileDisplayState(displayID: CGDirectDisplayID) {
         guard !restoring else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if uptime - lastHeartbeat >= 30 {
+            printStatus("Watchdog heartbeat: pid=\(getpid()), uptime=\(Int(uptime)).")
+            lastHeartbeat = uptime
+        }
         let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
         if observedSnapshot != snapshot {
             printStatus("Display state: external=\(snapshot.externalState), built-in online=\(snapshot.builtInOnline), active=\(snapshot.builtInActive), usable=\(snapshot.builtInUsable).")

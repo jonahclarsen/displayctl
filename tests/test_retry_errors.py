@@ -55,6 +55,17 @@ extension DisplayController {
 DisplayController().exerciseInactivePanel()
 ''')
 
+    def test_inactive_awake_connector_is_not_treated_as_monitor_sleep(self):
+        self.run_swift(r'''
+precondition(externalDisplayState([]) == .absent)
+precondition(externalDisplayState([(active: true, asleep: false)]) == .ready)
+precondition(externalDisplayState([(active: false, asleep: true)]) == .inactive)
+precondition(externalDisplayState([(active: false, asleep: false)]) == .absent,
+             "An unusable connector must allow laptop recovery")
+precondition(externalDisplayState([(active: true, asleep: true)]) == .inactive)
+precondition(externalDisplayState([(active: false, asleep: true), (active: true, asleep: false)]) == .ready)
+''')
+
     def test_mirror_requires_an_awake_active_source(self):
         self.run_swift(r'''
 precondition(usableDisplay(online: true, active: true, asleep: false, mirrorSourceActive: false))

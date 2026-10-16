@@ -22,6 +22,7 @@ use tauri_plugin_global_shortcut::ShortcutState;
 
 const SHORTCUT: &str = "ctrl+shift+d";
 const EMERGENCY_SHORTCUT: &str = "ctrl+alt+shift+d";
+const EMERGENCY_ALIAS: &str = "alt+shift+d";
 const POLL: Duration = Duration::from_millis(250);
 const REFRESH_RATE_POLL: Duration = Duration::from_secs(1);
 
@@ -181,6 +182,45 @@ fn emergency_off(app: &AppHandle) {
     });
 }
 
+fn recover_unplug(app: &AppHandle) {
+    let controller = app.state::<Controller>();
+    let stop_epoch = controller.stop_epoch.load(Ordering::SeqCst);
+    let _command = controller.command.lock().unwrap();
+    if controller.emergency_pending.load(Ordering::SeqCst)
+        || controller.stop_epoch.load(Ordering::SeqCst) != stop_epoch
+    {
+        return;
+    }
+    // Recheck after waiting for any toggle; a reconnect or a completed restore
+    // must cancel this request before it changes the display configuration.
+    let snapshot = match display::safety_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!("safety probe unavailable before recovery: {error}");
+            Some(display::SafetySnapshot::unavailable())
+        }
+    };
+    if !snapshot.is_some_and(display::SafetySnapshot::needs_recovery) {
+        return;
+    }
+    let resume = desired_off_path(app).exists();
+    log::warn!("independent unplug watchdog: no usable screen; restoring without waiting for the supervisor's event queue");
+    match display::restore() {
+        Ok(output) if output.status.success() => {
+            log::info!("unplug recovery: {}", String::from_utf8_lossy(&output.stdout).trim());
+            if resume && !controller.emergency_pending.load(Ordering::SeqCst)
+                && controller.stop_epoch.load(Ordering::SeqCst) == stop_epoch
+            {
+                // Continue supervising reconnects after replacing a stalled worker.
+                start_supervisor(app);
+            }
+        }
+        Ok(output) => log::error!("unplug recovery failed: {} {}", output.status, String::from_utf8_lossy(&output.stderr).trim()),
+        Err(error) => log::error!("unplug recovery failed: {error}"),
+    }
+    refresh(app);
+}
+
 fn refresh(app: &AppHandle) {
     let (state, _) = current_state();
     let controller = app.state::<Controller>();
@@ -270,15 +310,15 @@ pub fn run() {
         .build();
 
     let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcuts([SHORTCUT, EMERGENCY_SHORTCUT])
+        .with_shortcuts([SHORTCUT, EMERGENCY_SHORTCUT, EMERGENCY_ALIAS])
         .expect("invalid shortcut")
         .with_handler(|app, shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 log::debug!("shortcut {shortcut:?}");
-                if shortcut == &EMERGENCY_SHORTCUT.parse::<tauri_plugin_global_shortcut::Shortcut>().unwrap() {
-                    emergency_off(app);
-                } else {
+                if shortcut == &SHORTCUT.parse::<tauri_plugin_global_shortcut::Shortcut>().unwrap() {
                     toggle(app);
+                } else {
+                    emergency_off(app);
                 }
             }
         })
@@ -299,7 +339,7 @@ pub fn run() {
             log::info!("displayctl menu bar app starting; cli {}", display::binary().display());
 
             let (state, supervising) = current_state();
-            log::info!("emergency off shortcut registered: {EMERGENCY_SHORTCUT}");
+            log::info!("emergency off shortcuts registered: {EMERGENCY_SHORTCUT}, {EMERGENCY_ALIAS}");
             let emergency = MenuItem::with_id(app, "emergency", "Emergency Off — Restore Built-in Display", true, Some(EMERGENCY_SHORTCUT))?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let tray = TrayIconBuilder::with_id("main")
@@ -361,6 +401,34 @@ pub fn run() {
             thread::spawn(move || loop {
                 thread::sleep(REFRESH_RATE_POLL);
                 refresh_rate(&poller);
+            });
+
+            let safety = handle.clone();
+            thread::spawn(move || {
+                let mut watchdog = display::UnplugWatchdog::default();
+                let mut last_snapshot = None;
+                let mut last_log = Instant::now();
+                log::info!("independent unplug watchdog started");
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let snapshot = match display::safety_snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            log::warn!("independent safety probe failed: {error}");
+                            Some(display::SafetySnapshot::unavailable())
+                        }
+                    };
+                    if last_snapshot != Some(snapshot)
+                        || (snapshot.is_some() && last_log.elapsed() >= Duration::from_secs(30))
+                    {
+                        log::info!("independent safety state: {snapshot:?}");
+                        last_snapshot = Some(snapshot);
+                        last_log = Instant::now();
+                    }
+                    if watchdog.poll(snapshot, Instant::now()) {
+                        recover_unplug(&safety);
+                    }
+                }
             });
 
             if let Some(window) = app.get_webview_window("popover") {

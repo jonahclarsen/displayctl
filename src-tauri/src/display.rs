@@ -66,8 +66,70 @@ pub fn main_refresh_rate() -> Option<u32> {
 
 #[derive(serde::Deserialize)]
 struct Recovery {
+    #[serde(rename = "builtInDisplayID")]
+    built_in_display_id: u32,
     #[serde(rename = "watchdogPID")]
     watchdog_pid: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetySnapshot {
+    external_state: u8,
+    built_in_usable: bool,
+}
+
+impl SafetySnapshot {
+    pub fn unavailable() -> Self {
+        Self { external_state: 1, built_in_usable: false }
+    }
+
+    pub fn needs_recovery(self) -> bool {
+        // 0 = ready; 1 = absent/unusable; 2 = connected but asleep.
+        self.external_state == 1 && !self.built_in_usable
+    }
+}
+
+/// Independent of the Swift supervisor's event queue and Process implementation.
+pub fn safety_snapshot() -> io::Result<Option<SafetySnapshot>> {
+    let path = home().join(".local/state/displayctl/recovery.json");
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let recovery: Recovery = serde_json::from_slice(&data)?;
+    let mut command = Command::new(binary());
+    command.args(["probe-display-state", &recovery.built_in_display_id.to_string()]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(2))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("safety probe failed: {}", output.status)));
+    }
+    Ok(Some(serde_json::from_slice(&output.stdout)?))
+}
+
+#[derive(Default)]
+pub struct UnplugWatchdog {
+    missing_since: Option<Instant>,
+    last_attempt: Option<Instant>,
+}
+
+impl UnplugWatchdog {
+    pub fn poll(&mut self, snapshot: Option<SafetySnapshot>, now: Instant) -> bool {
+        if !snapshot.is_some_and(SafetySnapshot::needs_recovery) {
+            self.missing_since = None;
+            self.last_attempt = None;
+            return false;
+        }
+        let since = *self.missing_since.get_or_insert(now);
+        if now.duration_since(since) < Duration::from_secs(2)
+            || self.last_attempt.is_some_and(|at| now.duration_since(at) < Duration::from_secs(10))
+        {
+            return false;
+        }
+        self.last_attempt = Some(now);
+        true
+    }
 }
 
 /// PID of a running `displayctl off` supervisor, whoever started it.
@@ -120,6 +182,35 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Outp
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn independent_watchdog_recovers_when_supervisor_never_reports_unplug() {
+        let now = Instant::now();
+        let absent = SafetySnapshot::unavailable();
+        let mut guard = UnplugWatchdog::default();
+        assert!(!guard.poll(Some(absent), now));
+        assert!(guard.poll(Some(absent), now + Duration::from_secs(2)));
+        assert!(!guard.poll(Some(absent), now + Duration::from_secs(3)));
+        assert!(guard.poll(Some(absent), now + Duration::from_secs(12)));
+        // The supervisor's PID or heartbeat is deliberately not required.
+        let restored = SafetySnapshot { external_state: 1, built_in_usable: true };
+        assert!(!guard.poll(Some(restored), now + Duration::from_secs(13)));
+        assert!(!guard.poll(Some(absent), now + Duration::from_secs(14)));
+        assert!(guard.poll(Some(absent), now + Duration::from_secs(16)));
+    }
+
+    #[test]
+    fn independent_watchdog_preserves_sleep_and_resets_on_reconnect() {
+        let now = Instant::now();
+        let mut guard = UnplugWatchdog::default();
+        let asleep = SafetySnapshot { external_state: 2, built_in_usable: false };
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
+        assert!(!guard.poll(Some(asleep), now));
+        assert!(!guard.poll(Some(asleep), now + Duration::from_secs(30)));
+        assert!(!guard.poll(Some(SafetySnapshot::unavailable()), now + Duration::from_secs(31)));
+        assert!(!guard.poll(Some(ready), now + Duration::from_secs(32)));
+        assert!(!guard.poll(None, now + Duration::from_secs(40)));
+    }
 
     #[test]
     fn restore_timeout_releases_the_command_for_another_emergency_request() {
