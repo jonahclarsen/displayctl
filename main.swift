@@ -224,6 +224,18 @@ private func displayIsUsable(_ id: CGDirectDisplayID) -> Bool {
                          asleep: CGDisplayIsAsleep(id) != 0, mirrorSourceActive: sourceActive)
 }
 
+private func completeWithoutDisplayFade(_ config: CGDisplayConfigRef?) -> CGError {
+    // Quartz normally acquires the fade hardware when committing. Reserve it
+    // without fading so the commit skips that cosmetic effect. Do not add fade
+    // properties to the configuration: those can invalidate a soft-disconnect.
+    var token = CGDisplayFadeReservationToken(kCGDisplayFadeReservationInvalidToken)
+    let reserved = CGAcquireDisplayFadeReservation(5, &token) == .success
+    defer {
+        if reserved { _ = CGReleaseDisplayFadeReservation(token) }
+    }
+    return CGCompleteDisplayConfiguration(config, .forSession)
+}
+
 private func waitForDisplayProcess(_ process: Process, timeout: TimeInterval) throws {
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
     while process.isRunning {
@@ -624,16 +636,9 @@ private final class DisplayController {
             throw ToolError.configure(changed)
         }
 
-        if !online {
-            // Suppress Quartz's transaction-wide fade when only disconnecting
-            // the laptop panel. Keep the verified restoration path unchanged.
-            // Cosmetic failure must not cancel the actual display operation.
-            let fade = CGConfigureDisplayFadeEffect(config, 0, 0, 0, 0, 0)
-            if fade != .success {
-                printStatus("Could not suppress display fade: \(fade.rawValue).", toError: true)
-            }
-        }
-        let completed = CGCompleteDisplayConfiguration(config, .forSession)
+        let completed = online
+            ? CGCompleteDisplayConfiguration(config, .forSession)
+            : completeWithoutDisplayFade(config)
 
         // Commit the enable FIRST. An invalid/orphaned mirror can reject an
         // unmirror operation; canceling that transaction must not cancel enable.
