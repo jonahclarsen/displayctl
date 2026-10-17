@@ -64,6 +64,11 @@ pub fn main_refresh_rate() -> Option<u32> {
     (rate >= 1.0).then(|| rate.round() as u32)
 }
 
+// Match the Swift supervisor: a CPU spike can slow a 0.1 s probe past several
+// seconds for over a minute, which is not evidence of an unplug.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const UNKNOWN_GRACE: Duration = Duration::from_secs(30);
+
 #[derive(serde::Deserialize)]
 struct Recovery {
     #[serde(rename = "builtInDisplayID")]
@@ -120,7 +125,7 @@ pub fn safety_snapshot() -> io::Result<Option<SafetySnapshot>> {
     }
     let mut command = Command::new(binary());
     command.args(["probe-display-state", &recovery.built_in_display_id.to_string()]);
-    let output = run_with_timeout(&mut command, Duration::from_secs(2))?;
+    let output = run_with_timeout(&mut command, PROBE_TIMEOUT)?;
     if !output.status.success() {
         return Err(io::Error::other(format!("safety probe failed: {}", output.status)));
     }
@@ -149,7 +154,7 @@ impl UnplugWatchdog {
             let unknown_since = *self.unknown_since.get_or_insert(now);
             self.unknown_samples = self.unknown_samples.saturating_add(1);
             // Match the Swift supervisor: isolated slow reads do not restore.
-            if self.unknown_samples < 3 || now.duration_since(unknown_since) < Duration::from_secs(6) {
+            if self.unknown_samples < 3 || now.duration_since(unknown_since) < UNKNOWN_GRACE {
                 return false;
             }
         } else {
@@ -246,11 +251,13 @@ mod tests {
         let mut watchdog = UnplugWatchdog::default();
         assert!(!watchdog.poll(Some(unknown), now));
         assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(2)));
-        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(6)));
+        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(6)));
+        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(29)));
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(30)));
         // Failed restoration still retries, independently of the Swift worker.
-        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(12)));
-        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(16)));
-        assert!(!watchdog.poll(None, now + Duration::from_secs(17)));
+        assert!(!watchdog.poll(Some(unknown), now + Duration::from_secs(36)));
+        assert!(watchdog.poll(Some(unknown), now + Duration::from_secs(40)));
+        assert!(!watchdog.poll(None, now + Duration::from_secs(41)));
     }
 
     #[test]
@@ -267,6 +274,19 @@ mod tests {
         assert!(!guard.poll(Some(ready), now + Duration::from_secs(21)));
         assert!(!guard.poll(Some(absent), now + Duration::from_secs(22)));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(24)));
+    }
+
+    #[test]
+    fn cpu_spike_probe_timeouts_do_not_restore() {
+        // Probe results logged during a CPU spike on 2026-10-16 (seconds from first miss).
+        let now = Instant::now();
+        let mut guard = UnplugWatchdog::default();
+        let unknown = SafetySnapshot::unavailable();
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
+        for (at, snapshot) in [(0, unknown), (3, unknown), (5, ready), (9, unknown), (13, unknown),
+                               (16, unknown), (20, unknown), (25, unknown), (30, ready)] {
+            assert!(!guard.poll(Some(snapshot), now + Duration::from_secs(at)), "restored at {at}s");
+        }
     }
 
     #[test]

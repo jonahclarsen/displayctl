@@ -215,6 +215,11 @@ private struct DisplaySnapshot: Codable, Equatable {
     let builtInUsable: Bool
 }
 
+// Under heavy CPU load a probe that normally takes 0.1 s can exceed several
+// seconds for over a minute; restoring after six seconds turned the laptop on.
+private let probeTimeout: TimeInterval = 5
+private let unavailableProbeGrace: TimeInterval = 30
+
 // Require repeated misses over a bounded interval, not one slow query.
 private struct UnavailableProbeGuard {
     private var since: TimeInterval?
@@ -228,7 +233,7 @@ private struct UnavailableProbeGuard {
         }
         if since == nil { since = uptime }
         failures += 1
-        return failures >= 3 && uptime - since! >= 6
+        return failures >= 3 && uptime - since! >= unavailableProbeGrace
     }
 }
 
@@ -556,7 +561,7 @@ private final class DisplayController {
         probe.standardError = FileHandle.nullDevice
         do {
             try probe.run()
-            try waitForDisplayProcess(probe, timeout: 2)
+            try waitForDisplayProcess(probe, timeout: probeTimeout)
             let data = output.fileHandleForReading.readDataToEndOfFile()
             guard probe.terminationReason == .exit, probe.terminationStatus == 0 else { return fallback }
             return try JSONDecoder().decode(DisplaySnapshot.self, from: data)

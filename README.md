@@ -105,8 +105,9 @@ no usable screen for two seconds, it restores the built-in panel and replaces th
 supervisor so reconnect detection continues. A genuinely sleeping monitor is left
 alone; an inactive but awake connector does not count as a usable monitor.
 Failed safety probes are treated as unknown, not as a confirmed unplug. Isolated
-misses are retried without changing either display. Three consecutive failures
-spanning at least six seconds request recovery and suspend automatic switching
+misses are retried without changing either display; a probe may take up to five
+seconds. Three consecutive failures spanning at least thirty seconds (a CPU spike
+can slow probes for over a minute) request recovery and suspend automatic switching
 until explicitly enabled again;
 otherwise a slow probe could repeatedly restore and re-disable the laptop panel.
 The suspension survives an app relaunch. Confirmed unplug/reconnect detection

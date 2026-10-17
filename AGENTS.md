@@ -30,10 +30,12 @@
   suspension across restore and relaunch. Never resume an off worker just because
   a later probe succeeds after unknown-state recovery.
 - Retry isolated unknown probes without changing either display. Both watchdogs
-  require three consecutive unknown results spanning six seconds before invoking
-  uncertain recovery; known topology resets this grace period. Keep confirmed
-  unplug recovery prompt. Immediate suspension on one slow query was reproduced
-  turning the app back off shortly after enabling it.
+  allow each probe five seconds and require three consecutive unknown results
+  spanning thirty seconds before invoking uncertain recovery; known topology
+  resets this grace period. Keep confirmed unplug recovery prompt. Immediate
+  suspension on one slow query was reproduced turning the app back off shortly
+  after enabling it, and a six-second window still restored the laptop during a
+  CPU spike that made 0.1 s probes exceed 2 s for over a minute.
 - Unplug recovery was confirmed working by the user after `6d94406`. Keep visual
   transition optimizations confined to disabling the panel; preserve the verified
   restore path. Adding `CGConfigureDisplayFadeEffect` to a soft-disconnect

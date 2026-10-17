@@ -23,7 +23,7 @@ if CommandLine.arguments.dropFirst().first == "set-built-in" {
 extension DisplayController {
     func exerciseTimedOutProbe() throws {
         try saveRecovery(displayID: 123, watchdogPID: getpid())
-        for _ in 0..<5 {
+        for _ in 0..<8 {
             reconcileDisplayState(displayID: 123)
             Thread.sleep(forTimeInterval: 1)
         }
@@ -43,10 +43,13 @@ precondition(!guardState.shouldSuspend(.unknown, uptime: 0))
 precondition(!guardState.shouldSuspend(.ready, uptime: 1))
 precondition(!guardState.shouldSuspend(.unknown, uptime: 10))
 precondition(!guardState.shouldSuspend(.unknown, uptime: 20))
-precondition(guardState.shouldSuspend(.unknown, uptime: 21))
-precondition(!guardState.shouldSuspend(.inactive, uptime: 22))
+// A CPU spike can delay probes for a minute: 3 misses over 6 s is not enough.
 precondition(!guardState.shouldSuspend(.unknown, uptime: 30))
-precondition(!guardState.shouldSuspend(.absent, uptime: 31))
+precondition(!guardState.shouldSuspend(.unknown, uptime: 39))
+precondition(guardState.shouldSuspend(.unknown, uptime: 40))
+precondition(!guardState.shouldSuspend(.inactive, uptime: 41))
+precondition(!guardState.shouldSuspend(.unknown, uptime: 50))
+precondition(!guardState.shouldSuspend(.absent, uptime: 51))
 
 if CommandLine.arguments.dropFirst().first == "probe-display-state" { exit(1) }
 if CommandLine.arguments.dropFirst().first == "set-built-in" {
