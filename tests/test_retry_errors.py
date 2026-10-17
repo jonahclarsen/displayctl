@@ -407,7 +407,8 @@ DisplayController().exerciseRetryLogging()
             "until recovery."
         )
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr.splitlines(), [
+        # Drop the "[yyyy-MM-dd HH:mm:ss.SSS] " status timestamps.
+        self.assertEqual([line.split("] ", 1)[1] for line in result.stderr.splitlines()], [
             "displayctl: could not restore: CoreGraphics error 1014" + suffix,
             "displayctl: could not turn off: CoreGraphics error 1014" + suffix,
             "displayctl: could not restore: CoreGraphics error 1014" + suffix,
@@ -486,7 +487,7 @@ extension DisplayController {
 DisplayController().exerciseFailedRestoration()
 ''')
         self.assertEqual(result.stdout, "")
-        warnings = result.stderr.splitlines()
+        warnings = [line.split("] ", 1)[1] for line in result.stderr.splitlines()]
         self.assertEqual(len(warnings), 2)
         self.assertEqual(warnings[0], warnings[1])
         self.assertIn("CoreGraphics error 1014", warnings[0])

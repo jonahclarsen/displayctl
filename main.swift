@@ -463,6 +463,7 @@ private final class DisplayController {
 
     fileprivate func handleDisplayReconfiguration() {
         watchdogQueue.async { [self] in
+            printStatus("Display reconfiguration notification.")
             guard let record = try? loadRecovery() else { return }
             let displayID = record.builtInDisplayID
             // Give WindowServer a moment to publish the final online display list.
@@ -563,12 +564,21 @@ private final class DisplayController {
         printStatus("\(message) Retrying automatically; duplicate warnings will be suppressed until recovery.", toError: true)
     }
 
+    // Millisecond timestamps line up supervisor decisions with WindowServer's
+    // hot-plug events in `log show` when measuring unplug recovery latency.
+    private static let timestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
     private func printStatus(_ message: String, toError: Bool = false) {
+        let line = "[\(Self.timestamp.string(from: Date()))] \(message)"
         if toError {
-            fputs("\(message)\n", stderr)
+            fputs("\(line)\n", stderr)
             fflush(stderr)
         } else {
-            print(message)
+            print(line)
             fflush(stdout)
         }
     }

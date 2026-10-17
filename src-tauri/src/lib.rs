@@ -422,6 +422,22 @@ pub fn run() {
                 refresh_rate(&poller);
             });
 
+            // Diagnostic: when the DisplayPort hot-plug line changes, relative to
+            // WindowServer's own hot-plug events, to measure unplug latency.
+            thread::spawn(|| {
+                let mut hot_plugged = display::display_port_hot_plugged();
+                log::info!("display port hot-plug: {hot_plugged}");
+                loop {
+                    thread::sleep(Duration::from_millis(100));
+                    let now = display::display_port_hot_plugged();
+                    if now != hot_plugged {
+                        log::info!("display port hot-plug: {hot_plugged} -> {now} at {:?}", std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default());
+                        hot_plugged = now;
+                    }
+                }
+            });
+
             let safety = handle.clone();
             thread::spawn(move || {
                 let mut watchdog = display::UnplugWatchdog::default();
