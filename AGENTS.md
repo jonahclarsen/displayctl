@@ -36,6 +36,12 @@
   suspension on one slow query was reproduced turning the app back off shortly
   after enabling it, and a six-second window still restored the laptop during a
   CPU spike that made 0.1 s probes exceed 2 s for over a minute.
+- Unknown probes never count while the kernel reports DisplayPort hot-plug
+  (`IOPortTransportStateDisplayPort` `HPD_State` = 2) in-process: a monitor is
+  physically attached, so waiting out CPU load is always safe. Hot-plug only
+  vetoes uncertain recovery; never use it to restore or disable on its own.
+  Physical unplug behavior of HPD (node removed vs. low) still needs the user's
+  confirmation; either way it stops vetoing and the 30 s grace applies.
 - Unplug recovery was confirmed working by the user after `6d94406`. Keep visual
   transition optimizations confined to disabling the panel; preserve the verified
   restore path. Adding `CGConfigureDisplayFadeEffect` to a soft-disconnect

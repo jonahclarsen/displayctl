@@ -207,7 +207,7 @@ fn recover_unplug(app: &AppHandle) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             log::warn!("safety probe unavailable before recovery: {error}");
-            Some(display::SafetySnapshot::unavailable())
+            Some(display::SafetySnapshot::after_probe_failure())
         }
     };
     if !snapshot.is_some_and(display::SafetySnapshot::needs_recovery) {
@@ -442,7 +442,7 @@ pub fn run() {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
                             log::warn!("independent safety probe failed: {error}");
-                            Some(display::SafetySnapshot::unavailable())
+                            Some(display::SafetySnapshot::after_probe_failure())
                         }
                     };
                     if last_snapshot != Some(snapshot)

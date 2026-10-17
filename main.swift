@@ -1,6 +1,7 @@
 import CoreGraphics
 import Darwin
 import Foundation
+import IOKit
 import IOKit.pwr_mgt
 
 private typealias ConfigureDisplayEnabled = @convention(c) (
@@ -220,6 +221,25 @@ private struct DisplaySnapshot: Codable, Equatable {
 private let probeTimeout: TimeInterval = 5
 private let unavailableProbeGrace: TimeInterval = 30
 
+// The kernel's DisplayPort hot-plug-detect line, read in-process: no helper
+// process or WindowServer round trip, so CPU load cannot time it out. High
+// means a monitor is physically attached; absent or low proves nothing here.
+private func displayPortHotPlugged() -> Bool {
+    var iterator: io_iterator_t = 0
+    guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                       IOServiceMatching("IOPortTransportStateDisplayPort"),
+                                       &iterator) == KERN_SUCCESS else { return false }
+    defer { IOObjectRelease(iterator) }
+    var hotPlugged = false
+    while case let service = IOIteratorNext(iterator), service != 0 {
+        let state = IORegistryEntryCreateCFProperty(service, "HPD_State" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Int
+        IOObjectRelease(service)
+        if state == 2 { hotPlugged = true }
+    }
+    return hotPlugged
+}
+
 // Require repeated misses over a bounded interval, not one slow query.
 private struct UnavailableProbeGuard {
     private var since: TimeInterval?
@@ -302,6 +322,7 @@ private final class DisplayController {
     private var observedExternalState: ExternalDisplayState?
     private var observedSnapshot: DisplaySnapshot?
     private var unavailableProbes = UnavailableProbeGuard()
+    var hotPlugged: () -> Bool = displayPortHotPlugged
     private var lastHeartbeat: TimeInterval = 0
     private var externalReadySince = Date.distantPast
     private var reconcileErrors = ReconcileErrorLog()
@@ -459,8 +480,11 @@ private final class DisplayController {
             lastHeartbeat = uptime
         }
         let snapshot = freshProcessDisplaySnapshot(displayID: displayID)
+        // A slow probe while the monitor still holds hot-plug high is CPU load,
+        // not an unplug: keep waiting for a real answer without a deadline.
+        let attached = snapshot.externalState == .unknown && hotPlugged()
         let suspend = unavailableProbes.shouldSuspend(
-            snapshot.externalState, uptime: ProcessInfo.processInfo.systemUptime
+            attached ? .ready : snapshot.externalState, uptime: ProcessInfo.processInfo.systemUptime
         )
         if snapshot.externalState == .unknown {
             // Retry isolated misses without configuring either display.
@@ -1001,6 +1025,8 @@ do {
         exit(controller.probeExternalDisplay() == .ready ? EXIT_SUCCESS : EXIT_FAILURE)
     case "probe-external-state" where arguments.count == 1:
         exit(controller.probeExternalDisplay().rawValue)
+    case "probe-hot-plug" where arguments.count == 1:
+        exit(displayPortHotPlugged() ? EXIT_SUCCESS : EXIT_FAILURE)
     case "probe-display-state" where arguments.count == 2:
         guard let id = CGDirectDisplayID(arguments[1]) else { throw ToolError.invalidArguments }
         try controller.probeDisplaySnapshot(displayID: id)

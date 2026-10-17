@@ -22,6 +22,7 @@ if CommandLine.arguments.dropFirst().first == "set-built-in" {
 }
 extension DisplayController {
     func exerciseTimedOutProbe() throws {
+        hotPlugged = { false }
         try saveRecovery(displayID: 123, watchdogPID: getpid())
         for _ in 0..<8 {
             reconcileDisplayState(displayID: 123)
@@ -35,6 +36,31 @@ let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComp
 try DisplayController(recoveryURL: record).exerciseTimedOutProbe()
 ''', expected_status=75)
         self.assertIn("automatic switching suspended", result.stdout)
+
+    def test_probe_timeouts_never_restore_while_monitor_is_hot_plugged(self):
+        result = self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" { exit(1) }
+if CommandLine.arguments.dropFirst().first == "set-built-in" {
+    preconditionFailure("A slow probe with the monitor attached must not reconfigure anything")
+}
+extension DisplayController {
+    func exerciseCPUSpike() throws {
+        hotPlugged = { true }
+        try saveRecovery(displayID: 123, watchdogPID: getpid(), automationSuspended: false)
+        for second in 0..<40 {
+            reconcileDisplayState(displayID: 123)
+            if second < 39 { Thread.sleep(forTimeInterval: 1) }
+        }
+        let record = try loadRecoveryTarget()
+        precondition(record?.automationSuspended == false)
+        print("still supervising")
+    }
+}
+let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+    .appendingPathComponent("recovery.json")
+try DisplayController(recoveryURL: record).exerciseCPUSpike()
+''')
+        self.assertIn("still supervising", result.stdout)
 
     def test_isolated_unknown_probe_does_not_suspend_or_change_displays(self):
         self.run_swift(r'''

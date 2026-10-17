@@ -104,7 +104,11 @@ state every second, without relying on the supervisor's event queue. If there is
 no usable screen for two seconds, it restores the built-in panel and replaces the
 supervisor so reconnect detection continues. A genuinely sleeping monitor is left
 alone; an inactive but awake connector does not count as a usable monitor.
-Failed safety probes are treated as unknown, not as a confirmed unplug. Isolated
+Failed safety probes are treated as unknown, not as a confirmed unplug. When a
+probe fails, both watchdogs read the DisplayPort hot-plug-detect line from the
+kernel's IORegistry in-process (about 15 µs, no helper process). While a monitor
+still holds it high, the failure is just a slow probe (for example, during a CPU
+spike) and nothing changes, however long it lasts. Otherwise, isolated
 misses are retried without changing either display; a probe may take up to five
 seconds. Three consecutive failures spanning at least thirty seconds (a CPU spike
 can slow probes for over a minute) request recovery and suspend automatic switching

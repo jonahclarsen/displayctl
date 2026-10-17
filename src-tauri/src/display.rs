@@ -20,6 +20,66 @@ extern "C" {
     fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
 }
 
+type CFTypeRef = *const std::ffi::c_void;
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    static kIOMainPortDefault: u32;
+    fn IOServiceMatching(name: *const std::ffi::c_char) -> CFTypeRef;
+    fn IOServiceGetMatchingServices(port: u32, matching: CFTypeRef, iterator: *mut u32) -> i32;
+    fn IOIteratorNext(iterator: u32) -> u32;
+    fn IOObjectRelease(object: u32) -> i32;
+    fn IORegistryEntryCreateCFProperty(entry: u32, key: CFTypeRef, allocator: CFTypeRef, options: u32) -> CFTypeRef;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFStringCreateWithCString(allocator: CFTypeRef, string: *const std::ffi::c_char, encoding: u32) -> CFTypeRef;
+    fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut std::ffi::c_void) -> u8;
+    fn CFGetTypeID(object: CFTypeRef) -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFRelease(object: CFTypeRef);
+}
+
+/// The kernel's DisplayPort hot-plug-detect line, read in-process like the Swift
+/// supervisor does: no helper process or WindowServer round trip, so CPU load
+/// cannot time it out. High means a monitor is physically attached.
+pub fn display_port_hot_plugged() -> bool {
+    const UTF8: u32 = 0x0800_0100;
+    const SINT64: isize = 4;
+    // SAFETY: every IOKit object and CF value created here is released exactly once;
+    // IOServiceGetMatchingServices consumes the matching dictionary.
+    unsafe {
+        let mut iterator = 0u32;
+        let matching = IOServiceMatching(c"IOPortTransportStateDisplayPort".as_ptr());
+        if matching.is_null() || IOServiceGetMatchingServices(kIOMainPortDefault, matching, &mut iterator) != 0 {
+            return false;
+        }
+        let key = CFStringCreateWithCString(std::ptr::null(), c"HPD_State".as_ptr(), UTF8);
+        let mut hot_plugged = false;
+        loop {
+            let service = IOIteratorNext(iterator);
+            if service == 0 {
+                break;
+            }
+            let value = IORegistryEntryCreateCFProperty(service, key, std::ptr::null(), 0);
+            if !value.is_null() {
+                let mut state = 0i64;
+                if CFGetTypeID(value) == CFNumberGetTypeID()
+                    && CFNumberGetValue(value, SINT64, (&mut state as *mut i64).cast()) != 0
+                {
+                    hot_plugged |= state == 2;
+                }
+                CFRelease(value);
+            }
+            IOObjectRelease(service);
+        }
+        CFRelease(key);
+        IOObjectRelease(iterator);
+        hot_plugged
+    }
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME is not set"))
 }
@@ -100,13 +160,24 @@ impl SafetySnapshot {
         Self { external_state: 3, built_in_usable: false }
     }
 
+    /// The probe failed, but a monitor still holding hot-plug high is attached:
+    /// the WindowServer read is merely slow, as under heavy CPU load.
+    pub fn hot_plugged() -> Self {
+        Self { external_state: 4, built_in_usable: false }
+    }
+
+    pub fn after_probe_failure() -> Self {
+        if display_port_hot_plugged() { Self::hot_plugged() } else { Self::unavailable() }
+    }
+
     pub fn can_resume_after_recovery(self) -> bool {
         self.external_state == 1
     }
 
     pub fn needs_recovery(self) -> bool {
         // Unknown still permits rescue, but must not restart automatic disabling.
-        // 0 = ready; 1 = absent/unusable; 2 = asleep; 3 = probe unavailable.
+        // 0 = ready; 1 = absent/unusable; 2 = asleep; 3 = probe unavailable;
+        // 4 = probe unavailable but the monitor is still hot-plugged.
         matches!(self.external_state, 1 | 3) && !self.built_in_usable
     }
 }
@@ -290,6 +361,22 @@ mod tests {
     }
 
     #[test]
+    fn slow_probes_never_restore_while_the_monitor_is_hot_plugged() {
+        let now = Instant::now();
+        let mut guard = UnplugWatchdog::default();
+        let attached = SafetySnapshot::hot_plugged();
+        assert!(!attached.needs_recovery());
+        for second in 0..600 {
+            assert!(!guard.poll(Some(attached), now + Duration::from_secs(second)));
+        }
+        // Losing hot-plug starts the unknown grace period from scratch.
+        let unknown = SafetySnapshot::unavailable();
+        assert!(!guard.poll(Some(unknown), now + Duration::from_secs(600)));
+        assert!(!guard.poll(Some(unknown), now + Duration::from_secs(615)));
+        assert!(guard.poll(Some(unknown), now + Duration::from_secs(630)));
+    }
+
+    #[test]
     fn recovery_suspension_is_backward_compatible() {
         let old: Recovery = serde_json::from_str(r#"{"builtInDisplayID":1,"restored":true}"#).unwrap();
         assert!(!old.automation_suspended);
@@ -342,5 +429,7 @@ mod tests {
         time("main_refresh_rate", main_refresh_rate);
         time("built_in_online", built_in_online);
         time("supervisor_pid", supervisor_pid);
+        time("display_port_hot_plugged", display_port_hot_plugged);
+        println!("display_port_hot_plugged: {}", display_port_hot_plugged());
     }
 }
