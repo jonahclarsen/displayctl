@@ -1,7 +1,4 @@
-//! Menu bar icons, drawn at runtime: a laptop seen from the side.
-//! Lid open with light coming off the screen = built-in display on.
-//! Lid half shut = waiting for an external monitor before turning it off.
-//! Lid shut = built-in display off.
+//! Front-facing laptop icons: lit screen, waiting dots, or a crossed-out screen.
 
 use crate::State;
 
@@ -9,28 +6,33 @@ use crate::State;
 const POINTS: f32 = 18.0;
 const SCALE: usize = 2;
 pub const SIZE: usize = POINTS as usize * SCALE;
-const HINGE: (f32, f32) = (4.6, 13.4);
-const LID: f32 = 10.6;
 
 type Segment = ((f32, f32), (f32, f32), f32);
 
 fn segments(state: State) -> Vec<Segment> {
-    let angle: f32 = match state {
-        State::On => 100.0,
-        State::Armed => 40.0,
-        State::Off => 1.5,
-    };
-    let (sin, cos) = angle.to_radians().sin_cos();
     let mut lines = vec![
-        ((3.6, 15.3), (16.2, 15.3), 1.7),
-        (HINGE, (HINGE.0 + LID * cos, HINGE.1 - LID * sin), 1.7),
+        ((4.0, 3.0), (14.0, 3.0), 1.3),
+        ((4.0, 3.0), (4.0, 12.0), 1.3),
+        ((14.0, 3.0), (14.0, 12.0), 1.3),
+        ((4.0, 12.0), (14.0, 12.0), 1.3),
+        ((4.0, 12.0), (2.0, 15.0), 1.3),
+        ((14.0, 12.0), (16.0, 15.0), 1.3),
+        ((2.0, 15.0), (16.0, 15.0), 1.3),
     ];
-    if state == State::On {
-        lines.extend([
-            ((7.3, 9.5), (10.3, 10.6), 1.3),
-            ((7.4, 7.5), (10.6, 7.0), 1.3),
-            ((6.6, 5.8), (9.1, 3.7), 1.3),
-        ]);
+    match state {
+        State::On => lines.extend([
+            ((6.5, 6.0), (11.5, 6.0), 1.3),
+            ((6.5, 9.0), (11.5, 9.0), 1.3),
+        ]),
+        State::Armed => lines.extend([
+            ((6.5, 7.5), (6.55, 7.5), 1.4),
+            ((9.0, 7.5), (9.05, 7.5), 1.4),
+            ((11.5, 7.5), (11.55, 7.5), 1.4),
+        ]),
+        State::Off => lines.extend([
+            ((7.0, 5.5), (11.0, 9.5), 1.3),
+            ((11.0, 5.5), (7.0, 9.5), 1.3),
+        ]),
     }
     lines
 }

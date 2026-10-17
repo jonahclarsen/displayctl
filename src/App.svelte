@@ -5,7 +5,7 @@
 
   // on: built-in display on · armed: waiting for an external monitor · off: built-in display off
   let display = $state("on");
-  const lidAngle = { on: 100, armed: 40, off: 1.5 };
+  const displayLabel = { on: "On", armed: "Waiting for monitor", off: "Off" };
   let caffeine = $state({ active: false, minutes: 120, remaining_seconds: null });
   let minutes = $state(120);
   let busy = $state(false);
@@ -103,20 +103,19 @@
 
 <svelte:window {onkeydown} />
 
-<button class="display {display}" onclick={() => invoke("toggle_display")} aria-label="Toggle built-in display">
-  <svg viewBox="0 0 18 18" aria-hidden="true">
-    <g class="rays">
-      <line x1="7.3" y1="9.5" x2="10.3" y2="10.6" />
-      <line x1="7.4" y1="7.5" x2="10.6" y2="7" />
-      <line x1="6.6" y1="5.8" x2="9.1" y2="3.7" />
-    </g>
-    <line class="base" x1="3.6" y1="15.3" x2="16.2" y2="15.3" />
-    <line class="lid" x1="4.6" y1="13.4" x2="15.2" y2="13.4" style:transform="rotate(-{lidAngle[display]}deg)" />
+<button class="display {display}" onclick={() => invoke("toggle_display")} aria-label={`Toggle built-in display. ${displayLabel[display]}`} aria-pressed={display === "on"}>
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <rect class="screen" x="5" y="4" width="14" height="12" rx="1.5" />
+    <path d="m5 16-3 4h20l-3-4M10 20h4" />
+    {#if display === "off"}<path class="screen-mark" d="m9 8 6 5m0-5-6 5" />{/if}
+    {#if display === "armed"}<path class="screen-mark" d="M9 10h.01M12 10h.01M15 10h.01" />{/if}
   </svg>
+  <span class="display-title">Built-in display</span>
+  <span class="display-status"><span class="status-dot" aria-hidden="true"></span>{displayLabel[display]}</span>
 </button>
 
 <div class="caffeine" class:enabled={caffeine.active}>
-  <button class="coffee-toggle" disabled={busy} onclick={() => updateCaffeine(!caffeine.active)} aria-label="Caffeinate" aria-pressed={caffeine.active} title="Keep the Mac and display awake">
+  <button class="coffee-toggle" disabled={busy} onclick={() => updateCaffeine(!caffeine.active)} aria-label="Caffeinate" aria-pressed={caffeine.active}>
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5 9h12v7a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4Z" />
       <path d="M17 10h1a3 3 0 1 1 0 6h-1M8 3v3m4-4v4m4-3v3" />
@@ -128,24 +127,24 @@
     onpointerdown={startDrag} onpointermove={moveDrag} onpointerup={endDrag} onpointercancel={cancelDrag}
     onclick={durationClick} onkeydown={durationKey}
     aria-label={`Duration ${durationLabel(minutes)}. Drag or use left and right arrows to adjust by 30 minutes. Click to ${caffeine.active ? "disable" : "enable"}.`}
-    aria-pressed={caffeine.active} title="Drag left or right in 30-minute steps · click to toggle">
+    aria-pressed={caffeine.active}>
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5-3 3 3 3m6-6 3 3-3 3M2 8h12" /></svg>
     <span>{durationLabel(minutes)}</span>
   </button>
   <span class="session-status" aria-live="polite">{error ? "Couldn’t update" : caffeine.active ? `${Math.max(1, Math.ceil((caffeine.remaining_seconds ?? 0) / 60))} min left` : "Off"}</span>
 </div>
-{#if error}<p class="error" role="alert" title={error}>{error}</p>{/if}
+{#if error}<p class="error" role="alert">{error}</p>{/if}
 
 <style>
   :global(:root) {
     --ink: #1d1d1f;
-    --glow: #f5a623;
+    --accent: #007aff;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
     :global(:root) {
       --ink: #f5f5f7;
-      --glow: #ffc35a;
+      --accent: #409cff;
     }
   }
   :global(html, body) {
@@ -170,7 +169,20 @@
     place-items: center;
     color: var(--ink);
   }
-  .display { width: 100%; height: 90px; }
+  .display {
+    box-sizing: border-box;
+    width: 100%;
+    height: 90px;
+    margin-bottom: 8px;
+    padding: 8px;
+    align-content: center;
+    gap: 3px;
+  }
+  .display-title { font-size: 12px; font-weight: 600; }
+  .display-status { display: flex; align-items: center; gap: 5px; font-size: 10px; opacity: 0.65; }
+  .display.on .screen { fill: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .display.on .status-dot { background: var(--accent); }
+  .display.armed .status-dot { animation: breathe 2.4s ease-in-out infinite; }
   button:disabled { opacity: 0.6; }
   button:focus-visible svg {
     outline: 1.5px solid color-mix(in srgb, var(--ink) 35%, transparent);
@@ -179,67 +191,44 @@
   }
 
   .display svg {
-    width: 64px;
-    height: 64px;
+    width: 32px;
+    height: 32px;
     overflow: visible;
     fill: none;
     stroke: currentColor;
     stroke-width: 1.7;
     stroke-linecap: round;
+    stroke-linejoin: round;
     transition: transform 160ms ease;
   }
   button:active svg {
     transform: scale(0.92);
   }
 
-  .caffeine {
+  .caffeine, .display {
     border-radius: 15px;
     border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
     background: color-mix(in srgb, var(--ink) 4%, transparent);
     transition: background 180ms ease, border-color 180ms ease;
-    padding: 9px 8px 6px;
   }
+  .caffeine { padding: 9px 8px 6px; }
   .caffeine.enabled {
-    background: color-mix(in srgb, var(--glow) 24%, transparent);
-    border-color: color-mix(in srgb, var(--glow) 65%, transparent);
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 65%, transparent);
   }
   .coffee-toggle { display: flex; gap: 6px; width: 100%; font-size: 12px; font-weight: 600; }
   .coffee-toggle svg, .duration svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .coffee-toggle svg { width: 23px; height: 23px; }
   .status-dot { width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: color-mix(in srgb, var(--ink) 22%, transparent); }
-  .enabled .status-dot { background: var(--glow); box-shadow: 0 0 6px color-mix(in srgb, var(--glow) 65%, transparent); }
+  .enabled .status-dot { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent); }
   .duration { display: flex; justify-content: center; gap: 6px; width: 100%; height: 29px; margin-top: 4px; border-radius: 7px; cursor: ew-resize; touch-action: none; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .duration:hover, .duration.dragging { background: color-mix(in srgb, var(--ink) 9%, transparent); }
   .duration svg { width: 15px; height: 15px; opacity: 0.45; }
+  .duration > svg, .duration > span { pointer-events: none; cursor: inherit; }
   .session-status { display: block; text-align: center; font-size: 10px; line-height: 14px; color: var(--ink); opacity: 0.6; }
-  .duration:focus-visible, .coffee-toggle:focus-visible { outline: 2px solid var(--glow); outline-offset: 2px; border-radius: 7px; }
+  .duration:focus-visible, .coffee-toggle:focus-visible, .display:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 7px; }
   .error { position: absolute; inset: 5px; margin: 0; padding: 7px; border-radius: 8px; background: Canvas; color: CanvasText; font-size: 11px; pointer-events: none; }
 
-  .lid {
-    transform-box: view-box;
-    transform-origin: 4.6px 13.4px;
-    transition: transform 520ms cubic-bezier(0.34, 1.4, 0.5, 1);
-  }
-
-  .rays {
-    stroke: var(--glow);
-    stroke-width: 1.3;
-    opacity: 0;
-    transform: translateX(-1.5px);
-    transition: opacity 300ms ease, transform 400ms ease;
-  }
-  .on .rays {
-    opacity: 1;
-    transform: none;
-    transition-delay: 220ms;
-  }
-
-  .armed {
-    animation: breathe 2.4s ease-in-out infinite;
-  }
-  .off {
-    opacity: 0.55;
-  }
   @keyframes breathe {
     50% {
       opacity: 0.5;

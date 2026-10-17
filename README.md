@@ -69,11 +69,14 @@ Recovery state is stored at `~/.local/state/displayctl/recovery.json`. If a prev
 ## Menu bar app
 
 A Tauri/Svelte menu bar app wraps `displayctl off` / `displayctl on`. Its icon is a
-laptop seen from the side:
+laptop seen from the front:
 
-- lid open, glowing: built-in display on
-- lid half shut, pulsing in the popover: supervisor running, waiting for an external monitor
-- lid shut: built-in display off
+- lit screen: built-in display on
+- dots in the screen: supervisor running, waiting for an external monitor
+- crossed-out screen: built-in display off
+
+The popover pairs the laptop icon with a Built-in display label and an explicit
+On, Off, or Waiting for monitor status.
 
 The number beside it is the main display's current refresh rate in hertz.
 
@@ -83,7 +86,7 @@ in its own process group, so it keeps going across app restarts, and the app res
 it when manually relaunched if the display was off.
 
 The Caffeinate button below the display control keeps the Mac and display awake
-for two hours by default. Click to enable or disable it; amber highlighting and a
+for two hours by default. Click to enable or disable it; blue highlighting and a
 remaining-time label indicate an active session. Drag the duration left or right
 in 30-minute steps (30 minutes to 24 hours), or focus it and use the arrow keys.
 Changing an active duration restarts its timer. The assertion ends automatically
