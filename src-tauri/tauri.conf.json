@@ -15,8 +15,8 @@
       {
         "label": "popover",
         "title": "displayctl",
-        "width": 112,
-        "height": 112,
+        "width": 164,
+        "height": 210,
         "visible": false,
         "resizable": false,
         "decorations": false,

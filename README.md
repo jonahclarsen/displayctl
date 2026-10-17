@@ -77,10 +77,17 @@ laptop seen from the side:
 
 The number beside it is the main display's current refresh rate in hertz.
 
-Click the icon for a one-button popover, press Control-Shift-D anywhere, or run
+Click the icon for the display and Caffeinate controls, press Control-Shift-D anywhere, or run
 `pkill -USR1 displayctl-menubar` to toggle. Right-click for Quit. The supervisor runs
 in its own process group, so it keeps going across app restarts, and the app resumes
 it when manually relaunched if the display was off.
+
+The Caffeinate button below the display control keeps the Mac and display awake
+for two hours by default. Click to enable or disable it; amber highlighting and a
+remaining-time label indicate an active session. Drag the duration left or right
+in 30-minute steps (30 minutes to 24 hours), or focus it and use the arrow keys.
+Changing an active duration restarts its timer. The assertion ends automatically
+when the timer expires or the menu bar app exits, including during a relaunch.
 
 **Emergency off: Control–Option–Shift–D or Option–Shift–D**, anywhere while the
 menu bar app is running. Both shortcuts always restore; neither toggles.

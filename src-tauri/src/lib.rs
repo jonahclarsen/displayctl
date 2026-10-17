@@ -1,3 +1,4 @@
+mod caffeine;
 mod display;
 mod icon;
 
@@ -346,7 +347,8 @@ pub fn run() {
         .plugin(log_plugin)
         .plugin(shortcut_plugin)
         .manage(Controller::default())
-        .invoke_handler(tauri::generate_handler![get_state, toggle_display, hide])
+        .manage(caffeine::Caffeine::default())
+        .invoke_handler(tauri::generate_handler![get_state, toggle_display, hide, caffeine::get_caffeine, caffeine::set_caffeine])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
