@@ -238,6 +238,34 @@ fn recover_unplug(app: &AppHandle) {
     refresh(app);
 }
 
+/// The saved "off" preference only changes by explicit user action: if it is set
+/// and nothing is supervising (e.g. after a failed or interrupted unplug
+/// recovery), start waiting for the monitor again once the built-in is safe.
+fn reconcile_desired_off(app: &AppHandle) {
+    let controller = app.state::<Controller>();
+    if !desired_off_path(app).exists() || display::automation_suspended()
+        || controller.emergency_pending.load(Ordering::SeqCst)
+        || controller.busy.load(Ordering::SeqCst)
+        || display::supervisor_pid().is_some()
+    {
+        return;
+    }
+    let _command = controller.command.lock().unwrap();
+    let safe = match display::safety_snapshot() {
+        Ok(None) => true,
+        Ok(Some(snapshot)) => snapshot.built_in_usable(),
+        Err(_) => false,
+    };
+    if safe && desired_off_path(app).exists() && !display::automation_suspended()
+        && !controller.emergency_pending.load(Ordering::SeqCst)
+        && display::supervisor_pid().is_none()
+        && display::built_in_online()
+    {
+        log::info!("display-off preference is set but nothing is supervising; resuming");
+        start_supervisor(app);
+    }
+}
+
 fn refresh(app: &AppHandle) {
     let (state, _) = current_state();
     let controller = app.state::<Controller>();
@@ -416,6 +444,7 @@ pub fn run() {
             thread::spawn(move || loop {
                 thread::sleep(POLL);
                 refresh(&poller);
+                reconcile_desired_off(&poller);
             });
 
             let poller = handle.clone();

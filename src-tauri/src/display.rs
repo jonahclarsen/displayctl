@@ -170,6 +170,10 @@ impl SafetySnapshot {
         if display_port_hot_plugged() { Self::hot_plugged() } else { Self::unavailable() }
     }
 
+    pub fn built_in_usable(self) -> bool {
+        self.built_in_usable
+    }
+
     pub fn can_resume_after_recovery(self) -> bool {
         self.external_state == 1
     }
