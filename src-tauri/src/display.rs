@@ -153,17 +153,21 @@ pub fn automation_suspended() -> bool {
 pub struct SafetySnapshot {
     external_state: u8,
     built_in_usable: bool,
+    /// Asleep from the system's idle timer with no recent input: waking it
+    /// would fight display sleep, so it needs no recovery.
+    #[serde(default)]
+    built_in_idle_sleep: bool,
 }
 
 impl SafetySnapshot {
     pub fn unavailable() -> Self {
-        Self { external_state: 3, built_in_usable: false }
+        Self { external_state: 3, built_in_usable: false, built_in_idle_sleep: false }
     }
 
     /// The probe failed, but a monitor still holding hot-plug high is attached:
     /// the WindowServer read is merely slow, as under heavy CPU load.
     pub fn hot_plugged() -> Self {
-        Self { external_state: 4, built_in_usable: false }
+        Self { external_state: 4, built_in_usable: false, built_in_idle_sleep: false }
     }
 
     pub fn after_probe_failure() -> Self {
@@ -182,7 +186,7 @@ impl SafetySnapshot {
         // Unknown still permits rescue, but must not restart automatic disabling.
         // 0 = ready; 1 = absent/unusable; 2 = asleep; 3 = probe unavailable;
         // 4 = probe unavailable but the monitor is still hot-plugged.
-        matches!(self.external_state, 1 | 3) && !self.built_in_usable
+        matches!(self.external_state, 1 | 3) && !self.built_in_usable && !self.built_in_idle_sleep
     }
 }
 
@@ -301,23 +305,38 @@ mod tests {
     #[test]
     fn independent_watchdog_recovers_when_supervisor_never_reports_unplug() {
         let now = Instant::now();
-        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false, built_in_idle_sleep: false };
         let mut guard = UnplugWatchdog::default();
         assert!(!guard.poll(Some(absent), now));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(2)));
         assert!(!guard.poll(Some(absent), now + Duration::from_secs(3)));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(12)));
         // The supervisor's PID or heartbeat is deliberately not required.
-        let restored = SafetySnapshot { external_state: 1, built_in_usable: true };
+        let restored = SafetySnapshot { external_state: 1, built_in_usable: true, built_in_idle_sleep: false };
         assert!(!guard.poll(Some(restored), now + Duration::from_secs(13)));
         assert!(!guard.poll(Some(absent), now + Duration::from_secs(14)));
         assert!(guard.poll(Some(absent), now + Duration::from_secs(16)));
     }
 
     #[test]
+    fn idle_display_sleep_is_not_an_unplug() {
+        let slept: SafetySnapshot = serde_json::from_str(
+            r#"{"externalState":1,"builtInOnline":true,"builtInActive":false,"builtInUsable":false,"builtInIdleSleep":true}"#,
+        ).unwrap();
+        assert!(!slept.needs_recovery());
+        let now = Instant::now();
+        let mut watchdog = UnplugWatchdog::default();
+        for second in 0..60 {
+            assert!(!watchdog.poll(Some(slept), now + Duration::from_secs(second)));
+        }
+        let old: SafetySnapshot = serde_json::from_str(r#"{"externalState":1,"builtInUsable":false}"#).unwrap();
+        assert!(old.needs_recovery());
+    }
+
+    #[test]
     fn unknown_topology_allows_rescue_but_never_automatic_restart() {
         let unknown = SafetySnapshot::unavailable();
-        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false, built_in_idle_sleep: false };
         assert_ne!(unknown, absent);
         assert!(unknown.needs_recovery());
         assert!(!unknown.can_resume_after_recovery());
@@ -340,8 +359,8 @@ mod tests {
         let now = Instant::now();
         let mut guard = UnplugWatchdog::default();
         let unknown = SafetySnapshot::unavailable();
-        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
-        let absent = SafetySnapshot { external_state: 1, built_in_usable: false };
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false, built_in_idle_sleep: false };
+        let absent = SafetySnapshot { external_state: 1, built_in_usable: false, built_in_idle_sleep: false };
         assert!(!guard.poll(Some(unknown), now));
         assert!(!guard.poll(Some(ready), now + Duration::from_secs(1)));
         assert!(!guard.poll(Some(unknown), now + Duration::from_secs(10)));
@@ -357,7 +376,7 @@ mod tests {
         let now = Instant::now();
         let mut guard = UnplugWatchdog::default();
         let unknown = SafetySnapshot::unavailable();
-        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false, built_in_idle_sleep: false };
         for (at, snapshot) in [(0, unknown), (3, unknown), (5, ready), (9, unknown), (13, unknown),
                                (16, unknown), (20, unknown), (25, unknown), (30, ready)] {
             assert!(!guard.poll(Some(snapshot), now + Duration::from_secs(at)), "restored at {at}s");
@@ -394,8 +413,8 @@ mod tests {
     fn independent_watchdog_preserves_sleep_and_resets_on_reconnect() {
         let now = Instant::now();
         let mut guard = UnplugWatchdog::default();
-        let asleep = SafetySnapshot { external_state: 2, built_in_usable: false };
-        let ready = SafetySnapshot { external_state: 0, built_in_usable: false };
+        let asleep = SafetySnapshot { external_state: 2, built_in_usable: false, built_in_idle_sleep: false };
+        let ready = SafetySnapshot { external_state: 0, built_in_usable: false, built_in_idle_sleep: false };
         assert!(!guard.poll(Some(asleep), now));
         assert!(!guard.poll(Some(asleep), now + Duration::from_secs(30)));
         assert!(!guard.poll(Some(SafetySnapshot::unavailable()), now + Duration::from_secs(31)));

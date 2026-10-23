@@ -214,12 +214,23 @@ private struct DisplaySnapshot: Codable, Equatable {
     let builtInOnline: Bool
     let builtInActive: Bool
     let builtInUsable: Bool
+    // Asleep from the system's idle timer, not a black panel after unplug.
+    var builtInIdleSleep = false
 }
 
 // Under heavy CPU load a probe that normally takes 0.1 s can exceed several
 // seconds for over a minute; restoring after six seconds turned the laptop on.
 private let probeTimeout: TimeInterval = 5
 private let unavailableProbeGrace: TimeInterval = 30
+
+// macOS reports an idle-slept panel as asleep and inactive. Restoring it
+// declares user activity, which woke the lock screen every ~12 s all night.
+// A panel still asleep shortly after real input is a fault, so recover then.
+private let idleSleepInputGrace: TimeInterval = 5
+
+private func secondsSinceUserInput() -> TimeInterval {
+    CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
+}
 
 // The kernel's DisplayPort hot-plug-detect line, read in-process: no helper
 // process or WindowServer round trip, so CPU load cannot time it out. High
@@ -499,13 +510,14 @@ private final class DisplayController {
             restoreAndExit(displayID: displayID, message: "Built-in display restored; automatic switching suspended.", exitStatus: 75)
         }
         if observedSnapshot != snapshot {
-            printStatus("Display state: external=\(snapshot.externalState), built-in online=\(snapshot.builtInOnline), active=\(snapshot.builtInActive), usable=\(snapshot.builtInUsable).")
+            printStatus("Display state: external=\(snapshot.externalState), built-in online=\(snapshot.builtInOnline), active=\(snapshot.builtInActive), usable=\(snapshot.builtInUsable), idle sleep=\(snapshot.builtInIdleSleep).")
             observedSnapshot = snapshot
         }
         reconcileDisplayState(
             externalState: snapshot.externalState,
             builtInOnline: snapshot.builtInOnline,
-            builtInUsable: snapshot.builtInUsable
+            // Waking an idle-slept panel would fight display sleep.
+            builtInUsable: snapshot.builtInUsable || snapshot.builtInIdleSleep
         ) { online in
             try configureInFreshProcess(displayID: displayID, online: online)
         }
@@ -607,13 +619,16 @@ private final class DisplayController {
     func probeDisplaySnapshot(displayID: CGDirectDisplayID) throws {
         let externalState = probeExternalDisplay()
         let builtInActive = CGDisplayIsActive(displayID) != 0
+        let builtInOnline = CGDisplayIsOnline(displayID) != 0
         let snapshot = DisplaySnapshot(
             externalState: externalState,
-            builtInOnline: CGDisplayIsOnline(displayID) != 0,
+            builtInOnline: builtInOnline,
             builtInActive: builtInActive,
             builtInUsable: CGDisplayIsBuiltin(displayID) != 0
                 && api.onlineDisplayIDs().contains(displayID)
-                && displayIsUsable(displayID) && (builtInActive || externalState == .ready)
+                && displayIsUsable(displayID) && (builtInActive || externalState == .ready),
+            builtInIdleSleep: builtInOnline && CGDisplayIsAsleep(displayID) != 0
+                && secondsSinceUserInput() >= idleSleepInputGrace
         )
         FileHandle.standardOutput.write(try JSONEncoder().encode(snapshot))
     }

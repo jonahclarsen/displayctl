@@ -231,6 +231,32 @@ extension DisplayController {
 DisplayController().exerciseInactivePanel()
 ''')
 
+    def test_idle_display_sleep_is_left_alone_without_a_monitor(self):
+        result = self.run_swift(r'''
+if CommandLine.arguments.dropFirst().first == "probe-display-state" {
+    // The lock screen's idle timer slept the panel; nobody touched input.
+    FileHandle.standardOutput.write(try JSONEncoder().encode(
+        DisplaySnapshot(externalState: .absent, builtInOnline: true, builtInActive: false,
+                        builtInUsable: false, builtInIdleSleep: true)
+    ))
+    exit(0)
+}
+if CommandLine.arguments.dropFirst().first == "set-built-in" {
+    preconditionFailure("Restoring declares user activity and wakes an idle-slept screen")
+}
+extension DisplayController {
+    func exerciseIdleSleep() throws {
+        try saveRecovery(displayID: 123, watchdogPID: getpid())
+        for _ in 0..<3 { reconcileDisplayState(displayID: 123) }
+        print("left asleep")
+    }
+}
+let record = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+    .appendingPathComponent("recovery.json")
+try DisplayController(recoveryURL: record).exerciseIdleSleep()
+''')
+        self.assertIn("left asleep", result.stdout)
+
     def test_inactive_awake_connector_is_not_treated_as_monitor_sleep(self):
         self.run_swift(r'''
 precondition(externalDisplayState([]) == .absent)
